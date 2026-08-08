@@ -24,7 +24,7 @@ Hyprland._</sub>
 Plug the cable in, and the tablet becomes a monitor — no pairing, no app to
 launch on the host, no settings dialog:
 
-![Plugging a tablet in over USB and it appearing as a second monitor in Hyprland](docs/media/moreland_demo.gif)
+<img src="docs/media/moreland_demo.gif" alt="Plugging a tablet in over USB and it appearing as a second monitor in Hyprland" width="720">
 
 ## How it works
 

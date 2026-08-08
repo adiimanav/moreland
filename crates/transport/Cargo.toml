@@ -1,0 +1,15 @@
+[package]
+name = "transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+protocol.workspace = true
+
+[[bin]]
+name = "transport-probe"
+path = "src/bin/transport_probe.rs"

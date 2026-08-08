@@ -1,0 +1,19 @@
+[package]
+name = "daemon"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+signal-hook.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+capture.workspace = true
+encoder.workspace = true
+transport.workspace = true
+protocol.workspace = true
+
+[[bin]]
+name = "moreland"
+path = "src/main.rs"

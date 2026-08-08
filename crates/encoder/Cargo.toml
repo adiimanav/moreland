@@ -1,0 +1,19 @@
+[package]
+name = "encoder"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true
+gstreamer-allocators.workspace = true
+capture.workspace = true
+
+[[bin]]
+name = "encode-probe"
+path = "src/bin/encode_probe.rs"

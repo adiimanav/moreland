@@ -1,0 +1,8 @@
+/target
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.h264
+*.png
+.claude/

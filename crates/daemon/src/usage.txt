@@ -1,0 +1,28 @@
+moreland — turn a USB-connected Android tablet into a second monitor
+
+USAGE
+    moreland [OPTIONS]
+
+    With no options it runs as a daemon: plug the tablet in and a virtual
+    monitor appears, unplug it and the monitor disappears.
+
+OPTIONS
+    --max-width <PX>    cap on auto-detected width     [default: 1920]
+    --native            stream the tablet's full panel resolution
+    --width <PX>        pin width  (requires --height)
+    --height <PX>       pin height (requires --width)
+    --fps <N>           virtual output refresh rate    [default: 60]
+    --bitrate <KBPS>    H.264 target bitrate           [default: 20000]
+    --position <X>      x offset of the virtual output [default: 1920]
+
+    --once              stream one session, then exit
+    --seconds <N>       stop after N seconds (implies --once and --stats)
+    --stats             print round-trip latency statistics on exit
+    -h, --help          show this help
+
+NOTES
+    The tablet needs the companion app installed and USB debugging enabled.
+    Diagnostics from the device:  adb logcat -s Moreland
+
+    Resolution is detected from the tablet's panel and matched to its aspect
+    ratio, capped at --max-width. Pass --width and --height together to pin it.

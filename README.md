@@ -21,6 +21,11 @@ Hyprland._</sub>
 > See [Compatibility](#compatibility). Every number here is measured on that
 > hardware, not estimated — see [`docs/`](docs/) for how.
 
+Plug the cable in, and the tablet becomes a monitor — no pairing, no app to
+launch on the host, no settings dialog:
+
+![Plugging a tablet in over USB and it appearing as a second monitor in Hyprland](docs/media/moreland_demo.gif)
+
 ## How it works
 
 ```
@@ -70,7 +75,7 @@ nothing here.
 ## Install
 
 ```bash
-git clone <your-fork> moreland && cd moreland
+git clone https://github.com/adiimanav/moreland.git moreland && cd moreland
 ./install.sh
 ```
 

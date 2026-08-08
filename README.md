@@ -1,10 +1,10 @@
 # Moreland
 
 **Use an Android tablet as a second monitor on Linux/Wayland, over USB.**
-An alternative for Hyprland — wired, not wireless.
+An alternative for Hyprland - wired, not wireless.
 
 Plug the tablet in and a virtual monitor appears. Unplug it and the monitor
-disappears. Wayland-native, hardware-encoded, zero-copy — no VNC, no RDP, no X11.
+disappears. Wayland-native, hardware-encoded, zero-copy - no VNC, no RDP, no X11.
 
 <sub>_More land: more screen real estate. And it lives next door to Wayland and
 Hyprland._</sub>
@@ -19,9 +19,9 @@ Hyprland._</sub>
 > **Scope.** Verified on exactly one setup: Hyprland + AMD VA-API + a Xiaomi
 > Pad 6. Other GPUs are plausible and untested; other compositors need work.
 > See [Compatibility](#compatibility). Every number here is measured on that
-> hardware, not estimated — see [`docs/`](docs/) for how.
+> hardware, not estimated - see [`docs/`](docs/) for how.
 
-Plug the cable in, and the tablet becomes a monitor — no pairing, no app to
+Plug the cable in, and the tablet becomes a monitor - no pairing, no app to
 launch on the host, no settings dialog:
 
 <img src="docs/media/moreland_demo.gif" alt="Plugging a tablet in over USB and it appearing as a second monitor in Hyprland" width="720">
@@ -52,7 +52,7 @@ renders into is the same buffer the video encoder reads.
 **Host**
 
 - Hyprland (see [Compatibility](#compatibility) for others)
-- A GPU with VA-API encode — AMD, Intel, or NVIDIA via `nvidia-vaapi-driver`
+- A GPU with VA-API encode - AMD, Intel, or NVIDIA via `nvidia-vaapi-driver`
 - `gstreamer`, `gst-plugins-base`, `gst-plugin-va`, `libva`
 - `android-tools` (adb), Rust toolchain
 
@@ -65,9 +65,9 @@ sudo pacman -S --needed rust gstreamer gst-plugins-base gst-plugins-good \
 
 **Tablet**
 
-- Android 10+ (API 29), with hardware H.264 decode — effectively any tablet
+- Android 10+ (API 29), with hardware H.264 decode - effectively any tablet
 - USB debugging enabled
-- A USB **data** cable — charge-only cables will not enumerate
+- A USB **data** cable - charge-only cables will not enumerate
 
 USB 2.0 is fine. It measured 13× more bandwidth than this needs; USB 3 buys
 nothing here.
@@ -151,7 +151,7 @@ asked to do more than the screen can show:
 
 `--native` streams the panel's full resolution. On a 2880×1800 tablet that is
 2.5× the pixels of 1080p and will push the encoder hard for detail you cannot
-resolve on an 11" screen — measure before keeping it.
+resolve on an 11" screen - measure before keeping it.
 
 ## Performance
 
@@ -169,9 +169,9 @@ Xiaomi Pad 6 over USB 2.0.
 Sustained 60.07 fps, 99.7% of frames acknowledged as rendered, 16.2 Mbps.
 
 **Sub-20 ms is not achievable** with compressed video over USB to an Android
-device — the display pipeline on the tablet dominates and is not ours to
-control. For calibration, [scrcpy](https://github.com/Genymobile/scrcpy) — the
-most optimised project in this space — measures 25–45 ms running the same
+device - the display pipeline on the tablet dominates and is not ours to
+control. For calibration, [scrcpy](https://github.com/Genymobile/scrcpy) - the
+most optimised project in this space - measures 25–45 ms running the same
 pipeline in the opposite direction. This is fine for video, documents,
 terminals, and browsing; it is not fine for gaming or stylus work.
 
@@ -181,10 +181,10 @@ terminals, and browsing; it is not fine for gaming or stylus work.
 | --------------------- | --------------------------------------------------------------------------------------------------- |
 | **Hyprland**          | Verified                                                                                            |
 | Sway / wlroots        | Capture should work unchanged; output creation unimplemented                                        |
-| KDE Plasma (KWin)     | Needs investigation — see [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)                          |
+| KDE Plasma (KWin)     | Needs investigation - see [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)                          |
 | GNOME (Mutter)        | Requires a portal/PipeWire capture backend; Mutter implements neither wlr nor ext capture protocols |
 | AMD VA-API            | Verified                                                                                            |
-| Intel / NVIDIA VA-API | Plausible, untested — modifiers are probed at runtime                                               |
+| Intel / NVIDIA VA-API | Plausible, untested - modifiers are probed at runtime                                               |
 | Android 10+           | Verified on 14; nothing vendor-specific required                                                    |
 
 Only **one** stage is compositor-specific: creating the headless output. Capture
@@ -203,7 +203,7 @@ transport uses ADB. Adding a compositor means implementing create/remove in
   straight back to 60 fps on damage.
 - **Mild softness** from upscaling and H.264 on dark backgrounds. Raise
   `--bitrate` or `--max-width` if it bothers you.
-- **Resizing the virtual output mid-session** restarts the pipeline — the encoder
+- **Resizing the virtual output mid-session** restarts the pipeline - the encoder
   and decoder are both configured for a fixed geometry.
 
 ## Security
@@ -225,7 +225,7 @@ Neither is exploitable for anything beyond drawing on the tablet's screen, and
 neither reaches back into the host. But this is a single-user desktop tool and
 is not hardened for a hostile local user.
 
-**The app requests no Android permissions at all** — not even `INTERNET`. It can
+**The app requests no Android permissions at all** - not even `INTERNET`. It can
 draw to its own surface and nothing else.
 
 **Wire data is bounds-checked** on both sides: magic and version on the stream
@@ -241,7 +241,7 @@ Revoke authorisations when you are done: Developer options → _Revoke USB
 debugging authorisations_.
 
 **Build the APK yourself.** Release builds are signed with the Android _debug_
-key, which is a shared, publicly-known key — fine for sideloading something you
+key, which is a shared, publicly-known key - fine for sideloading something you
 compiled, meaningless as provenance. Do not trust a prebuilt APK from anyone,
 including this repo.
 
@@ -275,7 +275,7 @@ Full inventory in [`docs/REVERT.md`](docs/REVERT.md).
 
 Especially wanted:
 
-- **Compositor backends** — Sway is the smallest step; KWin the most requested
+- **Compositor backends** - Sway is the smallest step; KWin the most requested
 - **A portal/PipeWire capture backend**, which would make GNOME and KDE work at once
 - **Intel and NVIDIA reports**, positive or negative
 - **Touch input** via `zwlr_virtual_pointer_v1`

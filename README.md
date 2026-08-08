@@ -117,9 +117,9 @@ then on the tablet: **Files → Downloads → tap the APK → Install**.
 ### Run
 
 ```bash
-moreland                                        # foreground
-systemctl --user enable --now moreland    # on login
-journalctl --user -u moreland -f          # logs
+moreland                                          # foreground
+systemctl --user enable --now moreland.service    # on login
+journalctl --user -u moreland -f                  # logs
 ```
 
 Plug the tablet in. A monitor appears; drag windows to it.

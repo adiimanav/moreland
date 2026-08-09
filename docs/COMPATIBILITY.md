@@ -105,10 +105,25 @@ PipeWire capture path, and virtual-output creation comes free with it.
 `kpipewire` is already installed on a normal Plasma system and exposes exactly
 the right surface (`pipewiresourcestream.h`, `dmabufhandler.h`) for reference.
 
-The catch: `zkde_screencast_unstable_v1` is privileged and not in the public
-registry, so a client reaches it through xdg-desktop-portal rather than by
-binding it directly. That is the *portable route* below, and on KDE it is the
-only route.
+The protocol is privileged and absent from a plain registry listing, but **not
+portal-only** — a client binds it directly after declaring it in a desktop
+entry:
+
+```ini
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
+```
+
+Verified by A/B/A test on KWin 6.7.4: a user entry under
+`~/.local/share/applications` is enough, so this needs **no root**, and KWin
+matches the client's executable path rather than how it was launched, so a
+systemd-launched daemon qualifies. `Exec` must be an absolute path — the bare
+form is silently denied. `install.sh` installs this entry; the mechanics and
+the traps are in [06-plasma-backend.md](06-plasma-backend.md).
+
+Note that the portal is *not* the answer here: it appears unable to create
+virtual monitors, which is why KRDP ships a Plasma-specific session alongside
+its portal one. What remains unimplemented is the PipeWire capture backend
+behind the grant.
 
 ### GNOME / Mutter — hardest
 

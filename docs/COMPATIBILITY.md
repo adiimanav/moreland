@@ -117,8 +117,10 @@ Verified by A/B/A test on KWin 6.7.4: a user entry under
 `~/.local/share/applications` is enough, so this needs **no root**, and KWin
 matches the client's executable path rather than how it was launched, so a
 systemd-launched daemon qualifies. `Exec` must be an absolute path — the bare
-form is silently denied. `install.sh` installs this entry; the mechanics and
-the traps are in [06-plasma-backend.md](06-plasma-backend.md).
+form is silently denied. `install.sh` writes this entry **only on a Plasma
+session**, so a Hyprland install is not littered with it; force it with
+`MORELAND_INSTALL_DESKTOP_ENTRY=1`. The mechanics and the traps are in
+[06-plasma-backend.md](06-plasma-backend.md).
 
 Note that the portal is *not* the answer here: it appears unable to create
 virtual monitors, which is why KRDP ships a Plasma-specific session alongside

@@ -6,6 +6,10 @@
 
 pub mod discovery;
 pub mod dmabuf;
+/// KDE Plasma backend. Needs `plasma-wayland-protocols` at build time, so it
+/// is behind a feature and Hyprland builds never see it.
+#[cfg(feature = "plasma")]
+pub mod plasma;
 pub mod session;
 pub mod shm;
 

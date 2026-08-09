@@ -27,26 +27,44 @@ sed "s|ExecStart=%h/.local/bin/moreland|ExecStart=$BIN_DIR/moreland|" \
     "$REPO/systemd/moreland.service" > "$UNIT_DIR/moreland.service"
 systemctl --user daemon-reload
 
-# KDE needs a desktop entry declaring zkde_screencast_unstable_v1, or KWin
-# never advertises the protocol that creates the virtual output. The entry is
-# inert on Hyprland, Sway and GNOME, so it is installed unconditionally — but
-# nothing here is allowed to be fatal. A Hyprland install must not fail
-# because a KDE-shaped step did.
-say "Installing the desktop entry to $APP_DIR"
-if mkdir -p "$APP_DIR" 2>/dev/null &&
-   sed "s|^Exec=.*|Exec=$BIN_DIR/moreland|" \
-       "$REPO/desktop/moreland.desktop" > "$APP_DIR/moreland.desktop" 2>/dev/null; then
-    # KWin reads the service cache rather than the directory, so a stale cache
-    # hides the grant entirely.
-    if command -v kbuildsycoca6 >/dev/null 2>&1; then
-        if kbuildsycoca6 --noincremental >/dev/null 2>&1; then
-            say "Refreshed the KDE service cache (only matters on Plasma)"
-        else
-            warn "kbuildsycoca6 failed; run it by hand if you use KDE"
+# The desktop entry exists for exactly one reason: KWin only advertises
+# zkde_screencast_unstable_v1 to a client that declares it. It does nothing on
+# Hyprland, Sway or GNOME, so it is installed only on Plasma rather than left
+# sitting in a Hyprland user's application directory.
+#
+# Set MORELAND_INSTALL_DESKTOP_ENTRY=1 to install it anyway, for someone who
+# installs from a TTY or uses Plasma as a second session.
+wants_desktop_entry() {
+    [ "${MORELAND_INSTALL_DESKTOP_ENTRY:-0}" = "1" ] && return 0
+    case "${XDG_CURRENT_DESKTOP:-}" in
+        *KDE*) return 0 ;;
+    esac
+    return 1
+}
+
+if wants_desktop_entry; then
+    say "Installing the KDE desktop entry to $APP_DIR"
+    # Nothing here may be fatal: a KDE-shaped step must never fail an install.
+    if mkdir -p "$APP_DIR" 2>/dev/null &&
+       sed "s|^Exec=.*|Exec=$BIN_DIR/moreland|" \
+           "$REPO/desktop/moreland.desktop" > "$APP_DIR/moreland.desktop" 2>/dev/null; then
+        # KWin reads the service cache rather than the directory, so a stale
+        # cache hides the grant entirely.
+        if command -v kbuildsycoca6 >/dev/null 2>&1; then
+            kbuildsycoca6 --noincremental >/dev/null 2>&1 \
+                || warn "kbuildsycoca6 failed; run it by hand"
         fi
+    else
+        warn "Could not install the desktop entry"
     fi
 else
-    warn "Could not install the desktop entry; only KDE needs it"
+    say "Not a Plasma session: skipping the KDE desktop entry"
+    # Deliberately not removed. Someone who uses both Plasma and Hyprland
+    # would lose the grant they still need in the other session.
+    if [ -f "$APP_DIR/moreland.desktop" ]; then
+        warn "An earlier install left $APP_DIR/moreland.desktop; harmless here."
+        printf '    Remove it with: rm %s/moreland.desktop\n' "$APP_DIR"
+    fi
 fi
 
 # The APK is not built here: it needs the Android SDK, and a stale APK is

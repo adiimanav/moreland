@@ -134,7 +134,7 @@ moreland --seconds 15     stop after 15 s and print latency statistics
 --max-width <PX>           cap the auto-detected width   [default: 1920]
 --native                   stream at the tablet's full panel resolution
 --width <PX> --height <PX> pin an explicit resolution (both required)
---fps <N>                  virtual output refresh rate   [default: 60]
+--fps <N>                  virtual output refresh rate   [default: 90]
 --bitrate <KBPS>           H.264 target bitrate          [default: 20000]
 --position <X>             x offset of the virtual output [default: -1920]
                            negative sits left of the primary, positive right
@@ -215,7 +215,9 @@ second, PipeWire-based capture backend.
 - **No audio.** Video only.
 - **Idle output drops to ~1 fps.** Correct, not a bug: Hyprland does not render a
   static headless output, so a motionless screen costs almost nothing. It jumps
-  straight back to 60 fps on damage.
+  straight back to the configured rate on damage. Worth knowing when
+  benchmarking: measuring against an empty virtual output reports the idle rate,
+  not the pipeline's.
 - **Mild softness** from upscaling and H.264 on dark backgrounds. Raise
   `--bitrate` or `--max-width` if it bothers you.
 - **Resizing the virtual output mid-session** restarts the pipeline - the encoder

@@ -145,8 +145,25 @@ impl VirtualOutput {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
                 let spec = format!("{name},{width}x{height}@{refresh},{x}x{y},1");
-                run("hyprctl", &["keyword", "monitor", &spec])
+                let reply = run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
+                // Hyprland's Lua config parser (0.56+) refuses `keyword`
+                // outright — and refuses it on *stdout with a zero exit
+                // status*, so `run` reports success and the output silently
+                // keeps the compositor's defaults: `auto` scale, which on a
+                // headless output (physical size 0x0) resolves to 2, and
+                // `auto` position. Re-issue the same rule through `eval`,
+                // which that parser does accept. Syntax errors there exit
+                // non-zero, so `run` still catches a genuinely broken rule.
+                if reply.contains("non-legacy parsers") {
+                    let lua = format!(
+                        "hl.monitor({{ output = \"{name}\", \
+                         mode = \"{width}x{height}@{refresh}\", \
+                         position = \"{x}x{y}\", scale = 1 }})"
+                    );
+                    run("hyprctl", &["eval", &lua])
+                        .with_context(|| format!("configuring output as {lua}"))?;
+                }
             }
             // Sway is UNTESTED and everything else is unsupported; both cases
             // report themselves.

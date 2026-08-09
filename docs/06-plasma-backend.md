@@ -1,10 +1,18 @@
 # Stage 6 — KDE Plasma backend
 
-**Status: groundwork only.** The privileged-interface grant is in place and
-verified; the capture backend behind it is **not implemented**. Moreland still
-refuses to start on KDE, and `scripts/moreland-doctor.sh` still reports
-`BLOCKED`. This document records what was measured so the implementation does
-not have to rediscover it.
+**Status: the Wayland half is implemented and works. Creating a virtual output
+is blocked by a KWin bug.**
+
+`crates/capture/src/plasma/` binds the protocol and drives it correctly. On
+KWin 6.7.4:
+
+- Streaming an **existing** output succeeds — a real PipeWire node comes back.
+- Creating a **virtual** output fails with `Could not find output`, at every
+  size and scale tried, through the identical code path.
+
+So moreland could mirror a display on KDE today, but cannot yet extend to one.
+The PipeWire consumer is also still unwritten. `moreland-doctor.sh` continues
+to report `BLOCKED`, correctly.
 
 ## Why the existing capture path cannot work
 
@@ -129,6 +137,73 @@ than `hyprctl`, and whose lifetime is the screencast stream itself.
 New dependencies: `pipewire`, a Wayland binding generated from
 `zkde-screencast-unstable-v1.xml` (ships in `plasma-wayland-protocols`, **not
 installed by default**).
+
+## What was built, and what it proved
+
+`crates/capture/src/plasma/`, behind an off-by-default `plasma` cargo feature.
+The feature gates a build-time dependency on the protocol XML, so a Hyprland
+build is unchanged — verified by building the daemon with
+`MORELAND_ZKDE_SCREENCAST_XML` pointed at a nonexistent file.
+
+The XML is **not vendored**: it is LGPL-2.1-or-later against this project's
+Apache-2.0, so `build.rs` locates the system copy and writes a wrapper module
+into `OUT_DIR` with the resolved path baked in. `wayland-scanner`'s macros take
+a path literal, which a discovered path cannot otherwise be.
+
+`plasma-probe` exercises it both ways, and the comparison is the useful part:
+
+```console
+$ plasma-probe --mirror eDP-1
+  pipewire node  66
+  object serial  1453
+
+$ plasma-probe
+Error: KWin refused "moreland": Could not find output
+```
+
+Identical binding, grant, event handling and timeout logic — only the request
+differs. `WAYLAND_DEBUG=1` confirms the wire message is well formed:
+
+```
+-> zkde_screencast_unstable_v1@3.stream_virtual_output_with_description(
+     stream@5, "moreland", "Moreland tablet monitor", 1920, 1200, 1.0000, 2)
+<- zkde_screencast_stream_unstable_v1@5.failed, ("Could not find output")
+```
+
+**This means the grant mechanism is fully validated on a real project binary.**
+The desktop entry, the absolute-`Exec` requirement and the executable-path
+matching all work exactly as documented above.
+
+## The KWin bug
+
+In `src/plugins/screencast/screencastmanager.cpp`:
+
+```cpp
+auto output = kwinApp()->outputBackend()->createVirtualOutput(name, description, size, scale);
+streamOutput(stream, workspace()->findOutput(output), mode);
+```
+
+and in `streamOutput`:
+
+```cpp
+if (!streamOutput) {
+    waylandStream->sendFailed(i18n("Could not find output"));
+    return;
+}
+```
+
+So either `createVirtualOutput` returned null or `workspace()->findOutput()`
+could not map the result to a `LogicalOutput`. KWin logs nothing. Tried and
+ruled out: 1920x1200, 1920x1080, 1280x720, 800x600, scale 1 and 2, and both
+`stream_virtual_output` and `stream_virtual_output_with_description`.
+
+No matching report exists on bugs.kde.org. The `Output` / `LogicalOutput`
+split is recent, which makes a regression in `findOutput` plausible, but that
+is a hypothesis and not established.
+
+**Next step is upstream, not here.** Confirm against another client of the same
+protocol — `krfb-virtualmonitor` is the cheapest — and if it fails identically,
+file it against KWin with the `WAYLAND_DEBUG` trace above.
 
 ## Risks
 

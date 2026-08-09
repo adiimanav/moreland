@@ -8,6 +8,7 @@ set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 UNIT_DIR="$HOME/.config/systemd/user"
+APP_DIR="$HOME/.local/share/applications"
 
 say() { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m warn\033[0m %s\n' "$*"; }
@@ -25,6 +26,28 @@ mkdir -p "$UNIT_DIR"
 sed "s|ExecStart=%h/.local/bin/moreland|ExecStart=$BIN_DIR/moreland|" \
     "$REPO/systemd/moreland.service" > "$UNIT_DIR/moreland.service"
 systemctl --user daemon-reload
+
+# KDE needs a desktop entry declaring zkde_screencast_unstable_v1, or KWin
+# never advertises the protocol that creates the virtual output. The entry is
+# inert on Hyprland, Sway and GNOME, so it is installed unconditionally — but
+# nothing here is allowed to be fatal. A Hyprland install must not fail
+# because a KDE-shaped step did.
+say "Installing the desktop entry to $APP_DIR"
+if mkdir -p "$APP_DIR" 2>/dev/null &&
+   sed "s|^Exec=.*|Exec=$BIN_DIR/moreland|" \
+       "$REPO/desktop/moreland.desktop" > "$APP_DIR/moreland.desktop" 2>/dev/null; then
+    # KWin reads the service cache rather than the directory, so a stale cache
+    # hides the grant entirely.
+    if command -v kbuildsycoca6 >/dev/null 2>&1; then
+        if kbuildsycoca6 --noincremental >/dev/null 2>&1; then
+            say "Refreshed the KDE service cache (only matters on Plasma)"
+        else
+            warn "kbuildsycoca6 failed; run it by hand if you use KDE"
+        fi
+    fi
+else
+    warn "Could not install the desktop entry; only KDE needs it"
+fi
 
 # The APK is not built here: it needs the Android SDK, and a stale APK is
 # worse than an absent one.

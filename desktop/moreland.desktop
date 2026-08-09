@@ -1,0 +1,29 @@
+[Desktop Entry]
+Type=Application
+Name=Moreland
+Comment=Use an Android tablet as a second monitor over USB
+Exec=/usr/bin/moreland
+NoDisplay=true
+Terminal=false
+
+# KWin gates zkde_screencast_unstable_v1 behind this line: a client that does
+# not declare it never sees the global in the registry. That protocol is the
+# only way to create a virtual output on KDE — stream_virtual_output returns
+# the output and its PipeWire node in one call.
+#
+# Two things this file depends on, both verified on KWin 6.7.4:
+#
+#   1. Exec MUST be an absolute path. A bare command name is silently not
+#      matched, and the interface is denied with no diagnostic anywhere.
+#      install.sh rewrites the line above to the real install prefix.
+#   2. A user-installed entry under ~/.local/share/applications is honoured,
+#      so this needs no root. KWin matches on the client's executable path
+#      rather than how it was launched, so a daemon started by systemd is
+#      granted the interface just the same.
+#
+# Run kbuildsycoca6 after installing or removing this file; KWin reads the
+# service cache, not the directory, and a stale cache both hides a new grant
+# and preserves a revoked one.
+#
+# Inert on Hyprland, Sway and GNOME — they ignore the key entirely.
+X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1

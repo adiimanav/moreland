@@ -7,7 +7,9 @@
 //! single call** — the two problems the project treated separately on Hyprland
 //! collapse into one here.
 //!
-//! This module is that call. Consuming the PipeWire node is the other half and
+//! This module is that call — plus a workaround, because on KWin 6.7.4 the
+//! request creates the output *disabled* and then fails to find it. See
+//! [`KWIN_ORPHANED_OUTPUT`]. Consuming the PipeWire node is the other half and
 //! is not implemented yet; see `docs/06-plasma-backend.md`.
 //!
 //! **The protocol is privileged.** KWin only advertises the global to a client
@@ -27,7 +29,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::time::{Duration, Instant};
-use wayland_client::globals::{registry_queue_init, GlobalListContents};
+use wayland_client::globals::{registry_queue_init, GlobalList, GlobalListContents};
 use wayland_client::protocol::{wl_output, wl_registry};
 use wayland_client::{Connection, Dispatch, EventQueue, Proxy, QueueHandle};
 
@@ -63,6 +65,15 @@ const DESCRIPTION_SINCE: u32 = 4;
 
 /// Give KWin a bounded window to answer with `created`/`serial`/`failed`.
 const CREATE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// KWin 6.7.4 creates the virtual output, fails to look it back up, and
+/// reports this while leaving the output in place. Reproduced with KDE's own
+/// `krfb-virtualmonitor`, so it is the compositor's bug and not ours. Matched
+/// as a string because the protocol offers no error code.
+const KWIN_ORPHANED_OUTPUT: &str = "Could not find output";
+
+/// How long to wait for an enabled output to be advertised as a global.
+const ENABLE_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 struct State {
@@ -148,6 +159,80 @@ impl Dispatch<ZkdeScreencastStreamUnstableV1, ()> for State {
             StreamEvent::Closed => state.closed = true,
         }
     }
+}
+
+/// Bind every `wl_output` and return the one with this connector name.
+///
+/// Rebinds from scratch each call rather than caching: a virtual output only
+/// becomes a global at the moment it is created, so a list captured earlier
+/// will not contain the very output being looked for.
+fn find_output(
+    globals: &GlobalList,
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    qh: &QueueHandle<State>,
+    wanted: &str,
+    timeout: Duration,
+) -> Result<wl_output::WlOutput> {
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        // The advertisement is asynchronous, and after enabling an output it
+        // can trail the request by a beat, so poll rather than look once.
+        queue.roundtrip(state).context("syncing the registry")?;
+
+        state.outputs.clear();
+        let registry = globals.registry();
+        for global in globals
+            .contents()
+            .clone_list()
+            .iter()
+            .filter(|g| g.interface == "wl_output")
+        {
+            // The connector name arrives in wl_output::name, added in v4.
+            if global.version < 4 {
+                continue;
+            }
+            let index = state.outputs.len();
+            let output: wl_output::WlOutput = registry.bind(global.name, 4, qh, index);
+            state.outputs.push((output, None));
+        }
+        queue.roundtrip(state).context("enumerating outputs")?;
+
+        if let Some((proxy, _)) = state
+            .outputs
+            .iter()
+            .find(|(_, name)| name.as_deref() == Some(wanted))
+        {
+            return Ok(proxy.clone());
+        }
+
+        if Instant::now() >= deadline {
+            let seen: Vec<_> = state.outputs.iter().filter_map(|(_, n)| n.clone()).collect();
+            bail!("no output named {wanted:?} after {timeout:?}; found {seen:?}");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Enable a KWin output that exists but is switched off.
+///
+/// Shelling out to `kscreen-doctor` mirrors what the Hyprland backend already
+/// does with `hyprctl`, and KWin exposes no Wayland request a normal client
+/// can use for this: `kde_output_management_v2` would mean reimplementing the
+/// whole configuration-apply dance for one boolean.
+fn enable_output(wl_name: &str) -> Result<()> {
+    let output = std::process::Command::new("kscreen-doctor")
+        .arg(format!("output.{wl_name}.enable"))
+        .output()
+        .context("running kscreen-doctor (part of libkscreen; needed on KDE)")?;
+    if !output.status.success() {
+        bail!(
+            "kscreen-doctor could not enable {wl_name}: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 /// Pump events until the compositor says something conclusive about a stream.
@@ -255,7 +340,43 @@ impl PlasmaVirtualOutput {
         };
         conn.flush().ok();
 
-        settle(&mut queue, &mut state, &stream, name)?;
+        // KWin 6.7.4 creates the output and *then* fails to associate a stream
+        // with it, reporting "Could not find output" while leaving a perfectly
+        // good monitor behind. KDE's own krfb-virtualmonitor hits this too, so
+        // it is a compositor bug rather than a misuse of the protocol.
+        //
+        // The output is real and lives as long as this connection, so recover
+        // by streaming it the ordinary way. Note the failed stream is
+        // deliberately not closed: closing it is what removes the output.
+        let stream = match settle(&mut queue, &mut state, &stream, name) {
+            Ok(()) => stream,
+            Err(_) if state.failed.as_deref() == Some(KWIN_ORPHANED_OUTPUT) => {
+                // The output exists but KWin left it *disabled*, and a disabled
+                // output has no LogicalOutput — which is precisely why
+                // findOutput failed and why no wl_output global appeared.
+                // Switching it on completes what the compositor started.
+                let wl_name = format!("Virtual-{name}");
+                tracing::warn!(
+                    "KWin created {wl_name} disabled and reported \
+                     {KWIN_ORPHANED_OUTPUT:?}; enabling it and streaming directly"
+                );
+                enable_output(&wl_name)?;
+
+                let target =
+                    find_output(&globals, &mut queue, &mut state, &qh, &wl_name, ENABLE_TIMEOUT)
+                        .with_context(|| {
+                            format!("recovering from {KWIN_ORPHANED_OUTPUT:?} for {name:?}")
+                        })?;
+
+                state.failed = None;
+                state.closed = false;
+                let recovered = manager.stream_output(&target, cursor as u32, &qh, ());
+                conn.flush().ok();
+                settle(&mut queue, &mut state, &recovered, &wl_name)?;
+                recovered
+            }
+            Err(e) => return Err(e),
+        };
 
         let node_id = state
             .node_id
@@ -292,38 +413,14 @@ impl PlasmaVirtualOutput {
         let qh = queue.handle();
         let mut state = State::default();
 
-        // wl_output only reports its connector name from version 4.
-        let registry = globals.registry();
-        for global in globals
-            .contents()
-            .clone_list()
-            .iter()
-            .filter(|g| g.interface == "wl_output")
-        {
-            if global.version < 4 {
-                continue;
-            }
-            let index = state.outputs.len();
-            let output: wl_output::WlOutput = registry.bind(global.name, 4, &qh, index);
-            state.outputs.push((output, None));
-        }
-        queue
-            .roundtrip(&mut state)
-            .context("enumerating outputs")?;
-
-        let target = state
-            .outputs
-            .iter()
-            .find(|(_, name)| name.as_deref() == Some(output_name))
-            .map(|(proxy, _)| proxy.clone())
-            .with_context(|| {
-                let known: Vec<_> = state
-                    .outputs
-                    .iter()
-                    .filter_map(|(_, n)| n.clone())
-                    .collect();
-                format!("no output named {output_name:?}; found {known:?}")
-            })?;
+        let target = find_output(
+            &globals,
+            &mut queue,
+            &mut state,
+            &qh,
+            output_name,
+            Duration::ZERO,
+        )?;
 
         let manager: ZkdeScreencastUnstableV1 = globals
             .bind(&qh, MIN_VERSION..=MAX_VERSION, ())

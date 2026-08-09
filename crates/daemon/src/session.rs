@@ -36,7 +36,13 @@ impl Default for Config {
         Self {
             resolution: None,
             max_width: 1920,
-            fps: 60,
+            // Measured on Renoir + Pad 6 at 1920x1200, once capture and encode
+            // were on the same GPU: median round trip 33.5 ms at 60, 25.5 ms at
+            // 90, 18.8 ms at 120. Higher rates *lower* latency (a shorter frame
+            // interval means less waiting for the next slot) and cost fewer
+            // bytes, since smaller inter-frame deltas compress better. 144
+            // saturates: 163 of 1764 frames unacked and a 208 ms stall.
+            fps: 90,
             bitrate_kbps: 20_000,
             // Left of a primary at 0x0: the output spans [-width, 0), so the
             // origin is -width. Negative because Hyprland places the primary

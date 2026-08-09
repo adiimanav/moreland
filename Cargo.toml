@@ -14,6 +14,12 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# Generates bindings for zkde_screencast_unstable_v1 at build time. The XML is
+# located on the system rather than vendored: it is LGPL-2.1-or-later and this
+# project is Apache-2.0. See crates/capture/build.rs.
+wayland-scanner = "0.31"
+# Not used directly: the scanner-generated interface tables reference it.
+wayland-backend = "0.3"
 rustix = { version = "1", features = ["fs", "mm", "time"] }
 memmap2 = "0.9"
 png = "0.18"

@@ -88,6 +88,16 @@ fn main() -> Result<()> {
         .init();
 
     let args = parse_args();
+
+    // Refuse to start rather than discovering this once per device event. The
+    // compositor cannot change under a running daemon — the unit is
+    // PartOf=graphical-session.target — so an unsupported one is fatal, not
+    // transient, and the retry backoff would otherwise spin on it for as long
+    // as the session lasts.
+    let compositor = output::Compositor::detect();
+    compositor.ensure_supported()?;
+    tracing::info!("compositor: {}", compositor.name());
+
     let shutdown = Arc::new(AtomicBool::new(false));
 
     // SIGTERM matters here: systemd uses it to stop the service, and the

@@ -1,8 +1,13 @@
 # Compatibility
 
-**Verified on exactly one setup.** Everything else below is an assessment of
-what would be required, not a claim that it works. Nothing here has been tested
-on KDE Plasma, GNOME, or Sway.
+**Verified working on exactly one setup.** Everything else below is an
+assessment of what would be required, not a claim that it works. KDE Plasma has
+since been tested and is **verified blocked** — the reasons are recorded below.
+GNOME and Sway remain untested.
+
+Run [`scripts/moreland-doctor.sh`](../scripts/moreland-doctor.sh) to get this
+answer for your own machine: it checks the compositor, the capture protocol,
+the VA-API encoder and the ADB link, and names what blocks you.
 
 ## Verified
 
@@ -60,25 +65,50 @@ learn what it just made. Mechanical, but it needs writing and testing.
 Stub in place; `VirtualOutput::create` returns a clear error rather than
 pretending.
 
-### KDE Plasma / KWin — needs investigation
+### KDE Plasma / KWin — tested, blocked
 
-Two open questions, and I could not test either:
+Tested on **KWin 6.7.4**, Plasma 6.7.4, Wayland session, EndeavourOS. Both
+questions this section used to pose are now answered.
 
-1. **Does KWin implement `ext-image-copy-capture-v1`?** KWin has historically
-   exposed screen capture through its own `zkde_screencast_unstable_v1` and
-   xdg-desktop-portal rather than the wlr/ext capture protocols. If it does not,
-   the capture backend needs a second implementation (see *the portable route*
-   below).
-2. **How does KWin create a virtual output?** There is no `hyprctl` equivalent.
-   KWin's DBus surface is the place to look.
+**1. Does KWin implement `ext-image-copy-capture-v1`? No.**
 
-Check the first question on a KDE system with:
-
-```bash
-wayland-info | grep -E 'image_copy_capture|image_capture_source'
+```console
+$ wayland-info | grep -E 'image_copy_capture|image_capture_source'
+$ grep -rl ext_image_copy_capture_manager_v1 /usr/lib/ /usr/bin/
+$
 ```
 
-If both appear, capture works as-is and only output creation needs writing.
+Neither global is advertised, and the interface name does not appear in any
+installed binary — so this is not a privileged-client restriction that a
+different client could work around. The protocol is simply not implemented.
+`zwlr_screencopy_manager_v1` is absent too, so there is no legacy fallback.
+**`crates/capture` has nothing to bind to on KDE**, and no amount of work in
+`output.rs` changes that.
+
+`zwp_linux_dmabuf_v1` v5 *is* present, so the zero-copy import path itself is
+fine. Capture is the only missing piece.
+
+**2. How does KWin create a virtual output?** Through the same protocol that
+solves the first problem — which is the useful finding here:
+
+```console
+$ strings -a /usr/lib/qt6/plugins/kwin/plugins/screencast.so | grep -i virtualoutput
+_ZN4KWin21ScreencastV1Interface32virtualOutputScreencastRequestedEPNS_...
+```
+
+`zkde_screencast_unstable_v1` has a `stream_virtual_output` request that
+**creates a virtual output and returns a PipeWire stream of it in one call** —
+the mechanism behind KDE's own "virtual monitor" feature. So KDE does not need
+the two separate backends this document originally assumed. It needs one
+PipeWire capture path, and virtual-output creation comes free with it.
+
+`kpipewire` is already installed on a normal Plasma system and exposes exactly
+the right surface (`pipewiresourcestream.h`, `dmabufhandler.h`) for reference.
+
+The catch: `zkde_screencast_unstable_v1` is privileged and not in the public
+registry, so a client reaches it through xdg-desktop-portal rather than by
+binding it directly. That is the *portable route* below, and on KDE it is the
+only route.
 
 ### GNOME / Mutter — hardest
 
@@ -138,10 +168,58 @@ a mismatched aspect ratio will letterbox.
 USB 2.0 was the measured link here and had **13× headroom**, so USB 3 devices
 gain nothing — bandwidth was never the constraint.
 
+## Distributions
+
+**The distribution is very nearly irrelevant.** It is a tempting axis because
+it is the one users know they have, but nothing in the pipeline asks what
+distro it is on. What actually decides the answer is three things, and every
+mainstream distro can supply all three:
+
+| Requirement | Minimum | Why |
+|---|---|---|
+| A compositor implementing `ext-image-copy-capture-v1` | Hyprland, or wlroots 0.18+ | Capture has nothing to bind to otherwise |
+| GStreamer with the `va` plugin | 1.22+ (developed against 1.28) | `vapostproc` and `vah264enc` |
+| A VA-API driver | Mesa `radeonsi`/`iHD`, or `nvidia-vaapi-driver` | Hardware H.264 encode |
+
+A distro influences the outcome only indirectly, in two ways: **which desktop
+it installs by default**, and **how old its GStreamer is**. So "does Fedora
+work?" is not really a question about Fedora — Fedora Workstation ships GNOME
+and is blocked for the same reason Plasma is, while Fedora with Hyprland
+installed should work. The same holds for Ubuntu, Debian and openSUSE.
+
+The one genuine distro-level trap is GStreamer age: the `va` plugin element set
+only became usable around 1.22, so a conservative stable release (Debian
+oldstable, older Ubuntu LTS, RHEL) can fail on that alone even under Hyprland.
+
+Package names, since those *are* distro-specific — only the Arch line is
+verified, the rest are best-effort and untested:
+
+```bash
+# Arch / EndeavourOS / Manjaro — verified
+sudo pacman -S --needed rust gstreamer gst-plugins-base gst-plugins-good \
+                        gst-plugin-va libva libva-utils android-tools \
+                        android-udev wayland-utils
+
+# Fedora — UNVERIFIED
+sudo dnf install rust cargo gstreamer1-plugins-base gstreamer1-plugins-good \
+                 gstreamer1-plugins-bad-free libva libva-utils android-tools \
+                 wayland-utils
+
+# Debian / Ubuntu — UNVERIFIED, check GStreamer is 1.22+
+sudo apt install rustc cargo gstreamer1.0-plugins-base \
+                 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+                 libva2 vainfo adb wayland-utils
+```
+
+`scripts/moreland-doctor.sh` detects the distro and prints the matching line
+for whatever is missing.
+
 ## Contributing a compositor backend
 
-1. Confirm the capture protocols exist:
-   `wayland-info | grep -E 'image_copy_capture|image_capture_source'`
+1. Confirm the capture protocols exist: `scripts/moreland-doctor.sh`, or by
+   hand with `wayland-info | grep -E 'image_copy_capture|image_capture_source'`.
+   If they are absent, stop — the work is a PipeWire capture backend, not a
+   compositor backend, and `output.rs` is not where it goes.
 2. Add a variant to `Compositor` in `crates/daemon/src/output.rs` and detect it
    from the environment
 3. Implement create/remove for it

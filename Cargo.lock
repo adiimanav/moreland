@@ -73,8 +73,10 @@ dependencies = [
  "rustix 1.1.4",
  "tracing",
  "tracing-subscriber",
+ "wayland-backend",
  "wayland-client",
  "wayland-protocols",
+ "wayland-scanner",
 ]
 
 [[package]]

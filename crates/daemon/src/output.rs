@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Virtual output creation, per compositor.
 //!
 //! On a compositor that implements `ext-image-copy-capture-v1` this is the

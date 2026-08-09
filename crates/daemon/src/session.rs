@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! One streaming session: virtual output -> capture -> encode -> USB -> tablet.
 
 use anyhow::{bail, Context, Result};

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Wire format between the host daemon and the Android app.
 //!
 //! One stream header at connect, then a frame header + Annex-B payload per

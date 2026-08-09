@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stage 1 verification and capture benchmark.
 //!
 //!   capture-probe

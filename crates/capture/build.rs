@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Locates the `zkde_screencast_unstable_v1` protocol description and emits a
 //! module that turns it into client bindings.
 //!

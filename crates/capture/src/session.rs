@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Persistent capture session over `ext-image-copy-capture-v1`.
 //!
 //! The session and its buffer pool are created once and reused for every

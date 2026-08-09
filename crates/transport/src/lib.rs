@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Framed video transport to the device over `adb forward`.
 
 pub mod adb;

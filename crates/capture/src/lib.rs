@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Wayland screen capture for the Hyprland virtual output.
 //!
 //! Stage 1a: discovery only — enumerate globals and outputs so we can confirm

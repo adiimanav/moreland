@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Thin wrapper over the `adb` CLI.
 
 use anyhow::{bail, Context, Result};

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! GBM-backed DMA-BUF allocation for zero-copy capture.
 //!
 //! The compositor tells us which DRM device it wants buffers allocated on

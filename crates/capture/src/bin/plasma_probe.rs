@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stage 6 verification: create a real virtual output on KDE Plasma.
 //!
 //!   plasma-probe [--width PX] [--height PX] [--scale N]

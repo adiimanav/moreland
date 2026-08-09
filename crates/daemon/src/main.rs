@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Moreland daemon.
 //!
 //!   moreland                 watch for the tablet; stream whenever it is plugged in

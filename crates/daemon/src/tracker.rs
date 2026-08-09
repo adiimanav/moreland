@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Device hotplug detection over the ADB server protocol.
 //!
 //! `host:track-devices` streams a fresh device list every time one changes,

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Enumerate Wayland globals and outputs.
 
 use anyhow::{Context, Result};

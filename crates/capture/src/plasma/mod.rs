@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! KDE Plasma capture backend — virtual output half.
 //!
 //! KWin implements no `ext-` or `wlr-` capture protocol and KDE has declined

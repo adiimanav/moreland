@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Hardware H.264 encoding of captured DMA-BUF frames.
 //!
 //! ```text

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Anonymous shared-memory buffers for the shm capture path.
 //!
 //! This is the Stage 1b bring-up path only. It costs a full CPU-side copy of

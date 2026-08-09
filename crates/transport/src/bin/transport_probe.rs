@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stage 3 verification: framed transport over `adb forward`.
 //!
 //!   transport-probe [--frames N] [--flood] [--port P]

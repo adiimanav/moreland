@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 //! Stage 2 verification: capture -> encode, end to end, measured.
 //!
 //!   encode-probe <output> [--frames N] [--bitrate KBPS]

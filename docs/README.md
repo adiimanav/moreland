@@ -16,6 +16,8 @@ backed by a measurement taken on that hardware.
 | [03-transport.md](03-transport.md) | Stage 3 — wire protocol and USB transport |
 | [04-android-app.md](04-android-app.md) | Stage 4 — Android decoder app, build and install |
 | [05-daemon.md](05-daemon.md) | Stage 5 — daemon, hotplug detection, systemd service |
+| [06-plasma-backend.md](06-plasma-backend.md) | Stage 6 — KDE Plasma: why it is blocked, and the grant that unblocks it |
+| [COMPATIBILITY.md](COMPATIBILITY.md) | What each compositor and distribution needs |
 | [REVERT.md](REVERT.md) | How to undo everything this project touches |
 
 ## Architecture
@@ -49,7 +51,8 @@ Hyprland  ──hyprctl IPC──▶  virtual output "moreland" @ 1920x1200x60
 | 3 — Transport | host side done, verified byte-exact |
 | 4 — Android app | done, verified end to end |
 | 5 — Daemon + automation | done, verified |
-| 6 — Benchmark + tune | next: the 24 ms display-queue term |
+| 6 — KDE Plasma backend | groundwork only: interface grant verified, capture backend unimplemented |
+| 7 — Benchmark + tune | next: the 24 ms display-queue term |
 
 ## Latency budget
 

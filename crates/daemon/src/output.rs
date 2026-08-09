@@ -1,9 +1,15 @@
 //! Virtual output creation, per compositor.
 //!
-//! This is the **only** compositor-specific part of the project. Capture uses
-//! `ext-image-copy-capture-v1`, encoding uses VA-API, and transport uses ADB —
-//! all compositor-agnostic. Adding a compositor means implementing one thing:
+//! On a compositor that implements `ext-image-copy-capture-v1` this is the
+//! **only** compositor-specific part of the project: capture uses that standard
+//! protocol, encoding uses VA-API, and transport uses ADB, all of them
+//! compositor-agnostic. Adding such a compositor means implementing one thing —
 //! "create a headless output with this name and mode, and remove it later".
+//!
+//! A compositor *without* the protocol is a different and much larger problem,
+//! and it is not solved here. KWin 6.7 and Mutter both implement no `ext-` or
+//! `wlr-` capture protocol at all, so they need a second, PipeWire-based
+//! capture backend before this file is even reached.
 //!
 //! See `docs/COMPATIBILITY.md` for what each compositor needs.
 
@@ -20,18 +26,30 @@ pub enum Compositor {
 
 impl Compositor {
     /// Identify the running compositor from its environment markers.
+    ///
+    /// The markers alone are not enough. A systemd user service inherits the
+    /// environment of the session that started it and outlives it, so
+    /// `HYPRLAND_INSTANCE_SIGNATURE` can still be set — naming an instance
+    /// that exited hours ago — while the user is logged into something else
+    /// entirely. Believing it there costs the honest "unsupported compositor"
+    /// error and replaces it with `hyprctl ... failed:` and an empty stderr,
+    /// retried on a backoff forever. So every marker is confirmed against a
+    /// live IPC round-trip before it is trusted.
     pub fn detect() -> Self {
-        if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some() {
+        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+
+        if (std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+            || desktop.eq_ignore_ascii_case("Hyprland"))
+            && run("hyprctl", &["version"]).is_ok()
+        {
             return Compositor::Hyprland;
         }
-        if std::env::var_os("SWAYSOCK").is_some() {
+        if (std::env::var_os("SWAYSOCK").is_some() || desktop.eq_ignore_ascii_case("sway"))
+            && run("swaymsg", &["-t", "get_version"]).is_ok()
+        {
             return Compositor::Sway;
         }
-        match std::env::var("XDG_CURRENT_DESKTOP").as_deref() {
-            Ok(desktop) if desktop.eq_ignore_ascii_case("Hyprland") => Compositor::Hyprland,
-            Ok(desktop) if desktop.eq_ignore_ascii_case("sway") => Compositor::Sway,
-            _ => Compositor::Unsupported,
-        }
+        Compositor::Unsupported
     }
 
     pub fn name(self) -> &'static str {
@@ -39,6 +57,33 @@ impl Compositor {
             Compositor::Hyprland => "Hyprland",
             Compositor::Sway => "Sway",
             Compositor::Unsupported => "unsupported",
+        }
+    }
+
+    /// Fail unless this compositor can host a session, so the daemon can
+    /// refuse at startup instead of once per device event.
+    pub fn ensure_supported(self) -> Result<()> {
+        match self {
+            Compositor::Hyprland => Ok(()),
+            Compositor::Sway => bail!(
+                "Sway support is not implemented yet.\n\
+                 `swaymsg create_output` exists, but Sway names the result \
+                 itself, so the daemon must diff `swaymsg -t get_outputs` to \
+                 discover it. See docs/COMPATIBILITY.md."
+            ),
+            Compositor::Unsupported => {
+                let desktop =
+                    std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unset".to_string());
+                bail!(
+                    "unsupported compositor (XDG_CURRENT_DESKTOP={desktop}).\n\
+                     This needs a compositor that can create a headless output \
+                     and implements ext-image-copy-capture-v1.\n\
+                     Verified: Hyprland. KDE Plasma and GNOME implement neither \
+                     and need a PipeWire capture backend first.\n\
+                     Run scripts/moreland-doctor.sh for a full report, and see \
+                     docs/COMPATIBILITY.md."
+                )
+            }
         }
     }
 }
@@ -103,27 +148,9 @@ impl VirtualOutput {
                 run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
             }
-            Compositor::Sway => {
-                // UNTESTED. Sway's headless backend names outputs HEADLESS-N
-                // itself and offers no way to choose, so this resolves the name
-                // by diffing before and after. Reported working shapes welcome;
-                // see docs/COMPATIBILITY.md.
-                bail!(
-                    "Sway support is not implemented yet.\n\
-                     `swaymsg create_output` exists, but Sway names the result \
-                     itself, so the daemon must diff `swaymsg -t get_outputs` to \
-                     discover it. See docs/COMPATIBILITY.md."
-                );
-            }
-            Compositor::Unsupported => {
-                bail!(
-                    "unsupported compositor.\n\
-                     This needs a compositor that can create a headless output \
-                     and implements ext-image-copy-capture-v1.\n\
-                     Verified: Hyprland. See docs/COMPATIBILITY.md for what \
-                     KDE Plasma, GNOME and Sway would each require."
-                );
-            }
+            // Sway is UNTESTED and everything else is unsupported; both cases
+            // report themselves.
+            other => other.ensure_supported()?,
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
         Ok(Self {

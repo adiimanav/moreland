@@ -1,18 +1,25 @@
 # Stage 6 — KDE Plasma backend
 
-**Status: the Wayland half is implemented and works. Creating a virtual output
-is blocked by a KWin bug.**
+**Status: the Wayland half works. A real second monitor can be created on KDE
+Plasma, with a PipeWire node for its contents.** The PipeWire consumer that
+turns that node into frames is not written yet, so nothing reaches the tablet
+and `moreland-doctor.sh` still reports `BLOCKED`.
 
-`crates/capture/src/plasma/` binds the protocol and drives it correctly. On
-KWin 6.7.4:
+Verified on KWin 6.7.4 — a genuine output at `1920,0 1920x1200`, enabled, with
+PipeWire node 85, torn down cleanly when the client exits:
 
-- Streaming an **existing** output succeeds — a real PipeWire node comes back.
-- Creating a **virtual** output fails with `Could not find output`, at every
-  size and scale tried, through the identical code path.
+```console
+$ plasma-probe
+  name           moreland
+  pipewire node  85
+  object serial  1586
 
-So moreland could mirror a display on KDE today, but cannot yet extend to one.
-The PipeWire consumer is also still unwritten. `moreland-doctor.sh` continues
-to report `BLOCKED`, correctly.
+$ kscreen-doctor -o
+Output: 1 Virtual-moreland   enabled   Geometry: 1920,0 1920x1200
+Output: 2 eDP-1              enabled   Geometry: 0,0 1746x982
+```
+
+Getting there needed a workaround for a KWin bug, described below.
 
 ## Why the existing capture path cannot work
 
@@ -150,19 +157,13 @@ Apache-2.0, so `build.rs` locates the system copy and writes a wrapper module
 into `OUT_DIR` with the resolved path baked in. `wayland-scanner`'s macros take
 a path literal, which a discovered path cannot otherwise be.
 
-`plasma-probe` exercises it both ways, and the comparison is the useful part:
+`plasma-probe` also has a `--mirror` mode that streams an existing output. It
+was built to isolate a client bug from a compositor one, and it did exactly
+that: mirroring `eDP-1` returned a node while creating a virtual output failed,
+through identical binding, grant, event handling and timeout logic. It remains
+useful, both as a diagnostic and as the shape of a future mirroring feature.
 
-```console
-$ plasma-probe --mirror eDP-1
-  pipewire node  66
-  object serial  1453
-
-$ plasma-probe
-Error: KWin refused "moreland": Could not find output
-```
-
-Identical binding, grant, event handling and timeout logic — only the request
-differs. `WAYLAND_DEBUG=1` confirms the wire message is well formed:
+`WAYLAND_DEBUG=1` confirmed the failing request was well formed:
 
 ```
 -> zkde_screencast_unstable_v1@3.stream_virtual_output_with_description(
@@ -174,36 +175,49 @@ differs. `WAYLAND_DEBUG=1` confirms the wire message is well formed:
 The desktop entry, the absolute-`Exec` requirement and the executable-path
 matching all work exactly as documented above.
 
-## The KWin bug
+## The KWin bug, and the workaround
 
-In `src/plugins/screencast/screencastmanager.cpp`:
+`stream_virtual_output` fails with `Could not find output` — at every size and
+scale, and for both request variants. In
+`src/plugins/screencast/screencastmanager.cpp`:
 
 ```cpp
 auto output = kwinApp()->outputBackend()->createVirtualOutput(name, description, size, scale);
-streamOutput(stream, workspace()->findOutput(output), mode);
+streamOutput(stream, workspace()->findOutput(output), mode);   // -> null
 ```
 
-and in `streamOutput`:
+**KDE's own `krfb-virtualmonitor` fails identically**, with the same single
+request and the same error, which is what established this as a compositor bug
+rather than a misuse of the protocol.
 
-```cpp
-if (!streamOutput) {
-    waylandStream->sendFailed(i18n("Could not find output"));
-    return;
-}
+The diagnosis came from noticing that `kscreen-doctor` listed the output
+anyway:
+
+```
+Output: 1 Virtual-vtest   disabled   connected   Modes: 1920x1200@60
 ```
 
-So either `createVirtualOutput` returned null or `workspace()->findOutput()`
-could not map the result to a `LogicalOutput`. KWin logs nothing. Tried and
-ruled out: 1920x1200, 1920x1080, 1280x720, 800x600, scale 1 and 2, and both
-`stream_virtual_output` and `stream_virtual_output_with_description`.
+**The output is created, but disabled.** A disabled output has no
+`LogicalOutput`, so `workspace()->findOutput()` returns null — and it is never
+advertised as a `wl_output` global either, which is the same fact seen from
+the client side. Every symptom follows from that one thing.
 
-No matching report exists on bugs.kde.org. The `Output` / `LogicalOutput`
-split is recent, which makes a regression in `findOutput` plausible, but that
-is a hypothesis and not established.
+So the workaround is to finish what KWin started: enable the output, wait for
+its global to appear, and stream it with the ordinary `stream_output` request,
+which has always worked. `enable_output` shells out to `kscreen-doctor`,
+mirroring what the Hyprland backend already does with `hyprctl`; KWin exposes
+no request a normal client can use for this short of reimplementing
+`kde_output_management_v2`.
 
-**Next step is upstream, not here.** Confirm against another client of the same
-protocol — `krfb-virtualmonitor` is the cheapest — and if it fails identically,
-file it against KWin with the `WAYLAND_DEBUG` trace above.
+**KWin remembers the enabled state in memory, not on disk.** All virtual
+outputs share one KScreen UUID, so once any of them has been enabled, later
+ones in that session are created enabled and the first request simply succeeds
+— which is why the failure can look intermittent. Nothing is written under
+`~/.local/share/kscreen`, so a fresh login starts cold and fails again. Both
+paths are verified: the cold one by disabling the output to reproduce it.
+
+Still worth filing upstream, with the `WAYLAND_DEBUG` trace and the observation
+that the output lands disabled.
 
 ## Risks
 

@@ -167,8 +167,16 @@ Installed by `install.sh`, entirely inside `$HOME`:
 systemctl --user disable --now moreland.service
 rm -f ~/.config/systemd/user/moreland.service
 rm -f ~/.local/bin/moreland
+rm -f ~/.local/share/applications/moreland.desktop
 systemctl --user daemon-reload
+command -v kbuildsycoca6 >/dev/null && kbuildsycoca6 --noincremental
 ```
+
+The desktop entry exists only to declare `zkde_screencast_unstable_v1` to KWin
+(see [06-plasma-backend.md](06-plasma-backend.md)); it is `NoDisplay=true` and
+never appears in a menu. **Rebuild the service cache after removing it** — KWin
+reads the cache rather than the directory, so a stale cache keeps honouring a
+grant whose file is gone.
 
 Stopping the service with `systemctl` sends SIGTERM, which unwinds the RAII
 guards and removes the virtual output and adb forward. If the daemon was ever

@@ -84,18 +84,47 @@ else
         block "no linux-dmabuf; the zero-copy path cannot work"
     fi
 
-    # KWin exposes capture only through its own privileged protocol plus the
-    # portal, so it never appears in a plain registry listing. Say so rather
-    # than leaving the absence above looking like a packaging fault.
+    # KWin exposes capture only through its own privileged protocol, so it
+    # never appears in a plain registry listing. Say so rather than leaving
+    # the absence above looking like a packaging fault.
     if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ]; then
         info ""
-        info "KWin implements neither the ext- nor the wlr- capture protocols."
-        info "It exposes capture through zkde_screencast_unstable_v1 (privileged,"
-        info "portal-only) instead. Its stream_virtual_output request creates a"
-        info "virtual output AND returns a PipeWire stream in one call, so a KDE"
-        info "backend is one PipeWire capture path, not two separate problems."
-        info "See docs/COMPATIBILITY.md."
+        info "KWin implements neither the ext- nor the wlr- capture protocols,"
+        info "and KDE has declined to (bug 513785). It exposes capture through"
+        info "zkde_screencast_unstable_v1 instead, whose stream_virtual_output"
+        info "returns a virtual output AND its PipeWire stream in one call."
+        info "See docs/06-plasma-backend.md."
     fi
+fi
+
+# ------------------------------------------------- KDE backend groundwork ---
+# Not yet wired to anything: the Plasma capture backend is unimplemented. This
+# reports whether the privileged-interface grant is in place, because it fails
+# silently — KWin denies the protocol with no diagnostic anywhere.
+if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ]; then
+    head_ "KDE backend prerequisites (groundwork; backend not yet implemented)"
+
+    ENTRY="$HOME/.local/share/applications/moreland.desktop"
+    if [ -f "$ENTRY" ]; then
+        pass "desktop entry installed"
+        exec_line=$(grep -m1 '^Exec=' "$ENTRY" 2>/dev/null | cut -d= -f2-)
+        case "$exec_line" in
+            /*) pass "Exec is an absolute path ($exec_line)" ;;
+            *)  fail "Exec is not absolute: '$exec_line'"
+                info "KWin silently denies the interface for a bare command name." ;;
+        esac
+        if grep -q 'X-KDE-Wayland-Interfaces=.*zkde_screencast_unstable_v1' "$ENTRY"; then
+            pass "declares zkde_screencast_unstable_v1"
+        else
+            fail "does not declare zkde_screencast_unstable_v1"
+        fi
+    else
+        warn "no desktop entry at $ENTRY — run ./install.sh"
+    fi
+
+    command -v kbuildsycoca6 >/dev/null 2>&1 \
+        && pass "kbuildsycoca6 present (KWin reads the service cache, not the directory)" \
+        || warn "kbuildsycoca6 missing; a new entry may not be picked up"
 fi
 
 # ---------------------------------------------------------------- encoder ---

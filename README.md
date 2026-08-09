@@ -10,8 +10,8 @@ disappears. Wayland-native, hardware-encoded, zero-copy - no VNC, no RDP, no X11
 Hyprland._</sub>
 
 ```
-~24 ms    host → rendered on tablet
-60 fps    sustained at 1920x1200
+~19 ms    host → rendered on tablet, median round trip at 120 fps
+120 fps   at 1920x1200        (90 is the default; 144 saturates)
 16 Mbps   6% of the measured USB 2.0 ceiling
 0.6%      of one CPU core for capture
 ```
@@ -45,7 +45,9 @@ Hyprland  ──IPC──▶  headless output, sized to your tablet's aspect rat
 ```
 
 The whole path from compositor to encoder is zero-copy: the buffer Hyprland
-renders into is the same buffer the video encoder reads.
+renders into is the same buffer the video encoder reads. That holds only while
+the compositor renders on the GPU that encodes - on a dual-GPU laptop it is easy
+to have it silently not hold. See [Multi-GPU hosts](#multi-gpu-hosts).
 
 ## Requirements
 
@@ -169,9 +171,59 @@ Xiaomi Pad 6 over USB 2.0.
 
 Sustained 60.07 fps, 99.7% of frames acknowledged as rendered, 16.2 Mbps.
 
-**Sub-20 ms is not achievable** with compressed video over USB to an Android
-device - the display pipeline on the tablet dominates and is not ours to
-control. For calibration, [scrcpy](https://github.com/Genymobile/scrcpy) - the
+### Frame rate
+
+Round trip is _host send → device render → host ack_, measured over 25 s with a
+full-screen animating client on the virtual output. Measuring against an **idle**
+output instead reports ~1 fps and a ~800 ms median — that is the compositor
+correctly not redrawing a static screen, not the pipeline.
+
+| `--fps` | frames | unacked | median   | p95      | max        |
+| ------- | ------ | ------- | -------- | -------- | ---------- |
+| 60      | 1193   | 3       | 33.5 ms  | 34.8 ms  | 62.6 ms    |
+| 90      | 1567   | 6       | 25.5 ms  | 33.4 ms  | 61.1 ms    |
+| **120** | 2022   | 22      | **18.8 ms** | **29.0 ms** | **50.8 ms** |
+| 144     | 1764   | **163** | 26.4 ms  | 31.3 ms  | **208.5 ms** |
+
+**Higher frame rates lower latency**, which is not obvious: a shorter frame
+interval means less time waiting for the next slot. They also cost *fewer* bytes
+— 49.7 MB at 60 fps versus 41.9 MB at 120 — because smaller inter-frame deltas
+compress better. 144 is past the wall: a tenth of its frames go unacknowledged
+and the tail blows out to 208 ms.
+
+At a fixed bitrate, more frames means fewer bits each, so raise `--bitrate`
+alongside `--fps` for video or photo work. At 120 fps the encoder drew 16 Mbps
+against a measured 275 Mbps USB ceiling, so headroom is not the constraint.
+
+### Multi-GPU hosts
+
+On a laptop with both an integrated and a discrete GPU, **the compositor must
+render on the same GPU that encodes**. If it does not, every captured frame is
+copied across the PCIe bus before the encoder sees it, and the "zero-copy" path
+above is not zero-copy at all.
+
+Check which GPU your panel is actually wired to:
+
+```bash
+for s in /sys/class/drm/card*-*/status; do
+    [ "$(cat "$s")" = connected ] && echo "$(basename "$(dirname "$s")")"
+done
+```
+
+On the reference machine the internal panel hangs off the iGPU while the
+compositor was rendering on the dGPU — so frames crossed the bus twice, once to
+reach the encoder and once to reach the screen. Pinning Hyprland to the iGPU
+(`AQ_DRM_DEVICES`) removed both copies and let the dGPU runtime-suspend. Note
+that `AQ_DRM_DEVICES` is colon-separated, so `/dev/dri/by-path/` names cannot be
+used in it, and `cardN` numbering follows module probe order — a udev `SYMLINK+=`
+is the stable way to name a device.
+
+**Sub-20 ms glass to glass is still not achievable**, and the 18.8 ms above is
+not a counter-example: that is host send → device render → host ack, which stops
+at the point the tablet's compositor accepts the frame. Panel scanout (7–16 ms,
+not measurable in software) sits after it, so glass to glass at 120 fps is
+roughly 26–35 ms. The display pipeline on the tablet dominates and is not ours
+to control. For calibration, [scrcpy](https://github.com/Genymobile/scrcpy) - the
 most optimised project in this space - measures 25–45 ms running the same
 pipeline in the opposite direction. This is fine for video, documents,
 terminals, and browsing; it is not fine for gaming or stylus work.
@@ -180,7 +232,7 @@ terminals, and browsing; it is not fine for gaming or stylus work.
 
 |                       | Status                                                                                              |
 | --------------------- | --------------------------------------------------------------------------------------------------- |
-| **Hyprland**          | Verified                                                                                            |
+| **Hyprland**          | Verified, including 0.56's Lua config parser (see below)                                            |
 | Sway / wlroots        | Capture should work unchanged; output creation unimplemented                                        |
 | KDE Plasma (KWin)     | **Blocked, tested on KWin 6.7.4** - implements no `ext-`/`wlr-` capture protocol; needs a PipeWire backend |
 | GNOME (Mutter)        | Requires a portal/PipeWire capture backend; Mutter implements neither wlr nor ext capture protocols |
@@ -206,6 +258,30 @@ means implementing create/remove in
 [`crates/daemon/src/output.rs`](crates/daemon/src/output.rs) and nothing else.
 A compositor *without* the protocol - KDE, GNOME - is a much larger job: a
 second, PipeWire-based capture backend.
+
+### Hyprland's Lua config parser
+
+Hyprland 0.56 can run a Lua config instead of the legacy `.conf` format, and
+under it **`hyprctl keyword` refuses to work** - printing
+`keyword can't work with non-legacy parsers. Use eval.` to *stdout* and exiting
+**0**. Anything that checks only the exit status sees success.
+
+That is how the daemon set the virtual output's mode, position and scale, so on
+a Lua config all three were silently dropped and the output kept the
+compositor's defaults: `auto` position, and `auto` scale, which on a headless
+output (physical size `0x0`) resolves to **2** - a monitor where everything is
+twice the size. The daemon now detects that reply and reissues the rule through
+`hyprctl eval`, which the Lua parser accepts. Genuine errors there exit non-zero
+and are still caught.
+
+The same applies to `hyprctl dispatch`: bare-word syntax is parsed as Lua and
+no-ops. Use `hyprctl eval 'hl.exec_cmd("...")'` or
+`hyprctl dispatch 'hl.dsp.exec_cmd("...")'`.
+
+A static `hl.monitor{}` rule for the output is still worth keeping. Runtime
+rules are discarded on config reload, and with no static entry the output falls
+back to `auto` scale mid-session. A rule for an absent output is simply stored,
+so it is harmless while the tablet is unplugged.
 
 ## Known limitations
 

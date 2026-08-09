@@ -11,7 +11,8 @@ OPTIONS
     --native            stream the tablet's full panel resolution
     --width <PX>        pin width  (requires --height)
     --height <PX>       pin height (requires --width)
-    --fps <N>           virtual output refresh rate    [default: 60]
+    --fps <N>           virtual output refresh rate    [default: 90]
+                        120 measures better still; 144 saturates
     --bitrate <KBPS>    H.264 target bitrate           [default: 20000]
     --position <X>      x offset of the virtual output [default: -1920]
                         negative sits left of the primary, positive right

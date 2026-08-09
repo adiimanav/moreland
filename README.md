@@ -181,16 +181,30 @@ terminals, and browsing; it is not fine for gaming or stylus work.
 | --------------------- | --------------------------------------------------------------------------------------------------- |
 | **Hyprland**          | Verified                                                                                            |
 | Sway / wlroots        | Capture should work unchanged; output creation unimplemented                                        |
-| KDE Plasma (KWin)     | Needs investigation - see [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)                          |
+| KDE Plasma (KWin)     | **Blocked, tested on KWin 6.7.4** - implements no `ext-`/`wlr-` capture protocol; needs a PipeWire backend |
 | GNOME (Mutter)        | Requires a portal/PipeWire capture backend; Mutter implements neither wlr nor ext capture protocols |
 | AMD VA-API            | Verified                                                                                            |
 | Intel / NVIDIA VA-API | Plausible, untested - modifiers are probed at runtime                                               |
 | Android 10+           | Verified on 14; nothing vendor-specific required                                                    |
 
-Only **one** stage is compositor-specific: creating the headless output. Capture
-uses the standard `ext-image-copy-capture-v1` protocol, encoding uses VA-API,
-transport uses ADB. Adding a compositor means implementing create/remove in
+To check your own machine:
+
+```bash
+./scripts/moreland-doctor.sh
+```
+
+It reports the compositor, the capture protocol, the VA-API encoder and the ADB
+link, and names whatever blocks you. Note that your **distribution is not the
+deciding factor** - the compositor is. Fedora or Debian running Hyprland should
+work; Arch running Plasma does not.
+
+On a compositor that implements `ext-image-copy-capture-v1`, only **one** stage
+is compositor-specific: creating the headless output. Capture uses that standard
+protocol, encoding uses VA-API, transport uses ADB - so adding such a compositor
+means implementing create/remove in
 [`crates/daemon/src/output.rs`](crates/daemon/src/output.rs) and nothing else.
+A compositor *without* the protocol - KDE, GNOME - is a much larger job: a
+second, PipeWire-based capture backend.
 
 ## Known limitations
 

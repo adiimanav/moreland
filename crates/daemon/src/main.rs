@@ -49,6 +49,12 @@ fn parse_args() -> Args {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(config.position_x);
             }
+            "--position-y" => {
+                config.position_y = it
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(config.position_y);
+            }
             "--once" => once = true,
             "--stats" => config.stats = true,
             "--seconds" => {

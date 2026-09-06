@@ -146,7 +146,10 @@ impl VirtualOutput {
                         .context("creating headless output")?;
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
-                let spec = format!("{name},{width}x{height}@{refresh},{x}x{y},1");
+                // Keep the initial Hyprland placement automatic. Applying an
+                // explicit position while creating/configuring a headless output
+                // can cause Hyprland 0.56+ to reflow physical monitors.
+                let spec = format!("{name},{width}x{height}@{refresh},auto,1");
                 let reply = run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
                 // Hyprland's Lua config parser (0.56+) refuses `keyword`
@@ -161,7 +164,7 @@ impl VirtualOutput {
                     let lua = format!(
                         "hl.monitor({{ output = \"{name}\", \
                          mode = \"{width}x{height}@{refresh}\", \
-                         position = \"auto\", scale = 1 }})"
+                         position = \"{x}x{y}\", scale = 1 }})"
                     );
                     run("hyprctl", &["eval", &lua])
                         .with_context(|| format!("configuring output as {lua}"))?;

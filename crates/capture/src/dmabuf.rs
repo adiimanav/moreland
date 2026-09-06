@@ -146,8 +146,9 @@ fn resolve_render_node(dev: u64) -> Result<PathBuf> {
         }
     }
 
-    let matched = matched
-        .with_context(|| format!("no /dev/dri node matches dev_t {dev} advertised by compositor"))?;
+    let matched = matched.with_context(|| {
+        format!("no /dev/dri node matches dev_t {dev} advertised by compositor")
+    })?;
 
     let name = matched
         .file_name()
@@ -158,7 +159,9 @@ fn resolve_render_node(dev: u64) -> Result<PathBuf> {
     }
 
     // Primary node: hop through sysfs to its sibling render node.
-    let sysfs = PathBuf::from("/sys/class/drm").join(name).join("device/drm");
+    let sysfs = PathBuf::from("/sys/class/drm")
+        .join(name)
+        .join("device/drm");
     if let Ok(entries) = std::fs::read_dir(&sysfs) {
         for entry in entries.flatten() {
             let sibling = entry.file_name();

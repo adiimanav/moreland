@@ -94,14 +94,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         }
     };
 
-    let output = VirtualOutput::create(
-        &config.output_name,
-        width,
-        height,
-        config.fps,
-        config.position_x,
-        config.position_y,
-    )?;
+    let output = VirtualOutput::create(&config.output_name, config.position_x, config.position_y)?;
     tracing::info!(
         "virtual output {} at {}x{}@{}",
         output.name(),
@@ -230,7 +223,12 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
             let dmabuf = capture
                 .dmabuf(timing.buffer_index)
                 .context("capture produced no DMA-BUF")?;
-            encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, index * frame_duration_ns)?;
+            encoder.push_frame(
+                dmabuf.planes[0].fd.as_fd(),
+                dmabuf.planes[0].offset,
+                dmabuf.planes[0].stride,
+                index * frame_duration_ns,
+            )?;
             index += 1;
 
             while let Ok((data, pts, keyframe)) = packet_rx.try_recv() {
@@ -272,6 +270,9 @@ fn report(trips: &[Duration], frames: u64, bytes: u64) {
     println!("\n  round trip: host send -> device render -> host ack");
     println!("    min       {:>8.2} ms", ms(trips[0]));
     println!("    median    {:>8.2} ms", ms(trips[trips.len() / 2]));
-    println!("    p95       {:>8.2} ms", ms(trips[trips.len() * 95 / 100]));
+    println!(
+        "    p95       {:>8.2} ms",
+        ms(trips[trips.len() * 95 / 100])
+    );
     println!("    max       {:>8.2} ms", ms(trips[trips.len() - 1]));
 }

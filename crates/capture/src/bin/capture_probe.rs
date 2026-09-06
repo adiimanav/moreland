@@ -123,12 +123,18 @@ fn main() -> Result<()> {
     latencies.sort_unstable();
     println!("\n  capture latency (request -> ready)");
     println!("    min       {:>8.2} ms", ms(latencies[0]));
-    println!("    median    {:>8.2} ms", ms(latencies[latencies.len() / 2]));
+    println!(
+        "    median    {:>8.2} ms",
+        ms(latencies[latencies.len() / 2])
+    );
     println!(
         "    p95       {:>8.2} ms",
         ms(latencies[latencies.len() * 95 / 100])
     );
-    println!("    max       {:>8.2} ms", ms(latencies[latencies.len() - 1]));
+    println!(
+        "    max       {:>8.2} ms",
+        ms(latencies[latencies.len() - 1])
+    );
 
     if !ages.is_empty() {
         ages.sort_unstable();
@@ -158,7 +164,10 @@ fn main() -> Result<()> {
         deltas.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = deltas[deltas.len() / 2];
         println!("\n  frame pacing (compositor presentation deltas)");
-        println!("    median    {median:>8.2} ms  ({:.1} fps)", 1000.0 / median);
+        println!(
+            "    median    {median:>8.2} ms  ({:.1} fps)",
+            1000.0 / median
+        );
         println!("    min       {:>8.2} ms", deltas[0]);
         println!("    max       {:>8.2} ms", deltas[deltas.len() - 1]);
     }

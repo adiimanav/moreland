@@ -168,11 +168,7 @@ impl Encoder {
     pub fn new(config: &EncoderConfig) -> Result<Self> {
         gst::init().context("initialising GStreamer")?;
 
-        let drm_format = format!(
-            "{}:0x{:016x}",
-            fourcc_name(config.fourcc),
-            config.modifier
-        );
+        let drm_format = format!("{}:0x{:016x}", fourcc_name(config.fourcc), config.modifier);
 
         // DMA_DRM caps carry the tiling in `drm-format`; the encoder chain
         // stays on the GPU from here to the bitstream.
@@ -182,10 +178,7 @@ impl Encoder {
             .field("drm-format", &drm_format)
             .field("width", config.width as i32)
             .field("height", config.height as i32)
-            .field(
-                "framerate",
-                gst::Fraction::new(config.framerate as i32, 1),
-            )
+            .field("framerate", gst::Fraction::new(config.framerate as i32, 1))
             .build();
 
         let pipeline = gst::Pipeline::new();

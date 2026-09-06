@@ -360,7 +360,10 @@ impl Capture {
             .map(|o| o.proxy.clone())
             .with_context(|| {
                 let known: Vec<&str> = state.outputs.iter().map(|o| o.name.as_str()).collect();
-                format!("no output named {output_name:?} (have: {})", known.join(", "))
+                format!(
+                    "no output named {output_name:?} (have: {})",
+                    known.join(", ")
+                )
             })?;
 
         let source_manager: ExtOutputImageCaptureSourceManagerV1 = globals
@@ -600,7 +603,9 @@ impl Capture {
             return Err(CaptureError::Stopped);
         }
         if self.buffers.is_empty() {
-            return Err(CaptureError::Other(anyhow::anyhow!("capture pool is empty")));
+            return Err(CaptureError::Other(anyhow::anyhow!(
+                "capture pool is empty"
+            )));
         }
 
         let index = self.next_buffer;
@@ -703,10 +708,7 @@ fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
 /// When the consumer restricts modifiers, intersect against its list *in the
 /// consumer's preference order* and return exactly one, so GBM has no room to
 /// substitute something the consumer cannot read.
-fn pick_dmabuf_format(
-    formats: &[(u32, Vec<u64>)],
-    allowed: &[u64],
-) -> Result<(u32, Vec<u64>)> {
+fn pick_dmabuf_format(formats: &[(u32, Vec<u64>)], allowed: &[u64]) -> Result<(u32, Vec<u64>)> {
     const XR24: u32 = fourcc(b"XR24");
     const AR24: u32 = fourcc(b"AR24");
 

@@ -117,6 +117,80 @@ pub fn output_exists(compositor: Compositor, name: &str) -> bool {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MonitorPosition {
+    name: String,
+    x: i32,
+    y: i32,
+}
+
+fn hyprland_monitor_positions() -> Result<Vec<MonitorPosition>> {
+    let json = run("hyprctl", &["monitors", "-j"]).context("reading Hyprland monitor layout")?;
+
+    let monitors: serde_json::Value =
+        serde_json::from_str(&json).context("parsing Hyprland monitor JSON")?;
+
+    let monitors = monitors
+        .as_array()
+        .context("Hyprland monitor JSON is not an array")?;
+
+    let mut positions = Vec::with_capacity(monitors.len());
+
+    for monitor in monitors {
+        let name = monitor
+            .get("name")
+            .and_then(|v| v.as_str())
+            .context("Hyprland monitor has no name")?;
+
+        let x = monitor
+            .get("x")
+            .and_then(|v| v.as_i64())
+            .context("Hyprland monitor has no x position")?;
+
+        let y = monitor
+            .get("y")
+            .and_then(|v| v.as_i64())
+            .context("Hyprland monitor has no y position")?;
+
+        positions.push(MonitorPosition {
+            name: name.to_string(),
+            x: i32::try_from(x).context("Hyprland monitor x position is out of range")?,
+            y: i32::try_from(y).context("Hyprland monitor y position is out of range")?,
+        });
+    }
+
+    Ok(positions)
+}
+
+fn restore_hyprland_layout(
+    positions: &[MonitorPosition],
+    virtual_name: &str,
+    virtual_x: i32,
+    virtual_y: i32,
+) -> Result<()> {
+    let mut lua = String::new();
+
+    for monitor in positions {
+        if monitor.name == virtual_name {
+            continue;
+        }
+
+        lua.push_str(&format!(
+            "hl.monitor({{ output = \"{}\", position = \"{}x{}\" }}); ",
+            monitor.name, monitor.x, monitor.y
+        ));
+    }
+
+    lua.push_str(&format!(
+        "hl.monitor({{ output = \"{}\", position = \"{}x{}\", scale = 1 }})",
+        virtual_name, virtual_x, virtual_y
+    ));
+
+    run("hyprctl", &["eval", &lua]).context("restoring Hyprland monitor layout")?;
+
+    Ok(())
+}
+
 /// A headless output, removed when dropped.
 pub struct VirtualOutput {
     compositor: Compositor,
@@ -124,17 +198,17 @@ pub struct VirtualOutput {
 }
 
 impl VirtualOutput {
-    pub fn create(
-        name: &str,
-        width: u32,
-        height: u32,
-        refresh: u32,
-        x: i32,
-        y: i32,
-    ) -> Result<Self> {
+    pub fn create(name: &str, x: i32, y: i32) -> Result<Self> {
         let compositor = Compositor::detect();
         match compositor {
             Compositor::Hyprland => {
+                let saved_positions = hyprland_monitor_positions()?;
+
+                tracing::info!(
+                    "Hyprland layout BEFORE headless create: {:?}",
+                    saved_positions
+                );
+
                 if output_exists(compositor, name) {
                     tracing::info!("reusing existing output {name}");
                 } else {
@@ -144,31 +218,26 @@ impl VirtualOutput {
                     // guessing the name is a latent bug.
                     run("hyprctl", &["output", "create", "headless", name])
                         .context("creating headless output")?;
+
+                    let after_create = hyprland_monitor_positions()?;
+                    tracing::info!("Hyprland layout AFTER headless create: {:?}", after_create);
+
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
-                // Keep the initial Hyprland placement automatic. Applying an
-                // explicit position while creating/configuring a headless output
-                // can cause Hyprland 0.56+ to reflow physical monitors.
-                let spec = format!("{name},{width}x{height}@{refresh},auto,1");
-                let reply = run("hyprctl", &["keyword", "monitor", &spec])
-                    .with_context(|| format!("configuring output as {spec}"))?;
-                // Hyprland's Lua config parser (0.56+) refuses `keyword`
-                // outright — and refuses it on *stdout with a zero exit
-                // status*, so `run` reports success and the output silently
-                // keeps the compositor's defaults: `auto` scale, which on a
-                // headless output (physical size 0x0) resolves to 2, and
-                // `auto` position. Re-issue the same rule through `eval`,
-                // which that parser does accept. Syntax errors there exit
-                // non-zero, so `run` still catches a genuinely broken rule.
-                if reply.contains("non-legacy parsers") {
-                    let lua = format!(
-                        "hl.monitor({{ output = \"{name}\", \
-                         mode = \"{width}x{height}@{refresh}\", \
-                         position = \"{x}x{y}\", scale = 1 }})"
-                    );
-                    run("hyprctl", &["eval", &lua])
-                        .with_context(|| format!("configuring output as {lua}"))?;
-                }
+                // Hyprland 0.56+ reflows existing monitors when a headless
+                // output is created. Restore the complete layout in one Lua
+                // transaction after the new output has been registered.
+                tracing::info!(
+                    "restoring Hyprland layout: virtual output {} at {}x{}",
+                    name,
+                    x,
+                    y
+                );
+
+                restore_hyprland_layout(&saved_positions, name, x, y)?;
+
+                let after_restore = hyprland_monitor_positions()?;
+                tracing::info!("Hyprland layout AFTER restore: {:?}", after_restore);
             }
             // Sway is UNTESTED and everything else is unsupported; both cases
             // report themselves.

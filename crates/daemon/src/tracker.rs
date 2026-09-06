@@ -36,11 +36,9 @@ pub struct DeviceTracker {
 impl DeviceTracker {
     pub fn connect() -> Result<Self> {
         // Idempotent; brings the server up if this is the first client.
-        let _ = Command::new(
-            std::env::var("MORELAND_ADB").unwrap_or_else(|_| "adb".into()),
-        )
-        .arg("start-server")
-        .output();
+        let _ = Command::new(std::env::var("MORELAND_ADB").unwrap_or_else(|_| "adb".into()))
+            .arg("start-server")
+            .output();
 
         let mut stream = TcpStream::connect(ADB_SERVER)
             .with_context(|| format!("connecting to the ADB server at {ADB_SERVER}"))?;
@@ -83,7 +81,9 @@ fn send_request(stream: &mut TcpStream, request: &str) -> Result<()> {
 
 fn read_payload(stream: &mut TcpStream) -> Result<String> {
     let mut len_hex = [0u8; 4];
-    stream.read_exact(&mut len_hex).context("reading ADB length")?;
+    stream
+        .read_exact(&mut len_hex)
+        .context("reading ADB length")?;
     let len = usize::from_str_radix(
         std::str::from_utf8(&len_hex).context("ADB length was not UTF-8")?,
         16,

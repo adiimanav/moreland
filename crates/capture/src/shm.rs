@@ -22,9 +22,7 @@ pub struct ShmBuffer {
 
 impl ShmBuffer {
     pub fn new(width: u32, height: u32) -> Result<Self> {
-        let stride = width
-            .checked_mul(4)
-            .context("frame stride overflowed")?;
+        let stride = width.checked_mul(4).context("frame stride overflowed")?;
         let size = stride
             .checked_mul(height)
             .context("frame size overflowed")? as u64;

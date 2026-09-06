@@ -77,9 +77,13 @@ fn locate_xml() -> Option<PathBuf> {
         roots.extend(dirs.split(':').filter(|s| !s.is_empty()).map(PathBuf::from));
     }
     roots.extend(
-        ["/usr/share", "/usr/local/share", "/run/current-system/sw/share"]
-            .iter()
-            .map(PathBuf::from),
+        [
+            "/usr/share",
+            "/usr/local/share",
+            "/run/current-system/sw/share",
+        ]
+        .iter()
+        .map(PathBuf::from),
     );
 
     roots

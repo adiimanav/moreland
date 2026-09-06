@@ -164,9 +164,18 @@ fn main() -> Result<()> {
 
     println!("\n  write() latency (host -> kernel socket buffer)");
     println!("    min       {:>8.3} ms", ms(write_times[0]));
-    println!("    median    {:>8.3} ms", ms(write_times[write_times.len() / 2]));
-    println!("    p95       {:>8.3} ms", ms(write_times[write_times.len() * 95 / 100]));
-    println!("    max       {:>8.3} ms", ms(write_times[write_times.len() - 1]));
+    println!(
+        "    median    {:>8.3} ms",
+        ms(write_times[write_times.len() / 2])
+    );
+    println!(
+        "    p95       {:>8.3} ms",
+        ms(write_times[write_times.len() * 95 / 100])
+    );
+    println!(
+        "    max       {:>8.3} ms",
+        ms(write_times[write_times.len() - 1])
+    );
 
     println!("\n  throughput");
     println!("    frames    {}", sender.frames_sent());

@@ -53,7 +53,12 @@ fn main() -> Result<()> {
     let mut capture = Capture::new(&output, &capture_config)?;
 
     println!("=== Capture ===");
-    println!("  {}x{}  modifier 0x{:016x}", capture.width, capture.height, capture.modifier.unwrap_or(0));
+    println!(
+        "  {}x{}  modifier 0x{:016x}",
+        capture.width,
+        capture.height,
+        capture.modifier.unwrap_or(0)
+    );
 
     let encoder_config = EncoderConfig {
         width: capture.width,
@@ -139,7 +144,12 @@ fn main() -> Result<()> {
     for i in 0..20u64 {
         let timing = capture.capture_frame()?;
         let dmabuf = capture.dmabuf(timing.buffer_index).unwrap();
-        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, i * frame_duration_ns)?;
+        encoder.push_frame(
+            dmabuf.planes[0].fd.as_fd(),
+            dmabuf.planes[0].offset,
+            dmabuf.planes[0].stride,
+            i * frame_duration_ns,
+        )?;
     }
     std::thread::sleep(Duration::from_millis(200));
     submitted.lock().unwrap().clear();
@@ -153,7 +163,12 @@ fn main() -> Result<()> {
             .context("capture returned no DMA-BUF")?;
         let pts = (i + 100) * frame_duration_ns;
         submitted.lock().unwrap().push_back(Instant::now());
-        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, pts)?;
+        encoder.push_frame(
+            dmabuf.planes[0].fd.as_fd(),
+            dmabuf.planes[0].offset,
+            dmabuf.planes[0].stride,
+            pts,
+        )?;
     }
     let wall = wall_start.elapsed();
 
@@ -168,16 +183,28 @@ fn main() -> Result<()> {
     }
 
     println!("\n  throughput");
-    println!("    rate      {:>8.2} fps", frames as f64 / wall.as_secs_f64());
+    println!(
+        "    rate      {:>8.2} fps",
+        frames as f64 / wall.as_secs_f64()
+    );
     println!("    packets   {} ({keyframes} keyframes)", sizes.len());
 
     if !latencies.is_empty() {
         latencies.sort_unstable();
         println!("\n  encode latency (push -> packet, pipelined)");
         println!("    min       {:>8.2} ms", ms(latencies[0]));
-        println!("    median    {:>8.2} ms", ms(latencies[latencies.len() / 2]));
-        println!("    p95       {:>8.2} ms", ms(latencies[latencies.len() * 95 / 100]));
-        println!("    max       {:>8.2} ms", ms(latencies[latencies.len() - 1]));
+        println!(
+            "    median    {:>8.2} ms",
+            ms(latencies[latencies.len() / 2])
+        );
+        println!(
+            "    p95       {:>8.2} ms",
+            ms(latencies[latencies.len() * 95 / 100])
+        );
+        println!(
+            "    max       {:>8.2} ms",
+            ms(latencies[latencies.len() - 1])
+        );
     }
 
     let total: usize = sizes.iter().sum();

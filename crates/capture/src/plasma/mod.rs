@@ -210,7 +210,11 @@ fn find_output(
         }
 
         if Instant::now() >= deadline {
-            let seen: Vec<_> = state.outputs.iter().filter_map(|(_, n)| n.clone()).collect();
+            let seen: Vec<_> = state
+                .outputs
+                .iter()
+                .filter_map(|(_, n)| n.clone())
+                .collect();
             bail!("no output named {wanted:?} after {timeout:?}; found {seen:?}");
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -364,11 +368,17 @@ impl PlasmaVirtualOutput {
                 );
                 enable_output(&wl_name)?;
 
-                let target =
-                    find_output(&globals, &mut queue, &mut state, &qh, &wl_name, ENABLE_TIMEOUT)
-                        .with_context(|| {
-                            format!("recovering from {KWIN_ORPHANED_OUTPUT:?} for {name:?}")
-                        })?;
+                let target = find_output(
+                    &globals,
+                    &mut queue,
+                    &mut state,
+                    &qh,
+                    &wl_name,
+                    ENABLE_TIMEOUT,
+                )
+                .with_context(|| {
+                    format!("recovering from {KWIN_ORPHANED_OUTPUT:?} for {name:?}")
+                })?;
 
                 state.failed = None;
                 state.closed = false;

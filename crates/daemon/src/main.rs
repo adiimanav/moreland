@@ -33,9 +33,7 @@ fn parse_args() -> Args {
 
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
-        let mut next_u32 = |default: u32| {
-            it.next().and_then(|v| v.parse().ok()).unwrap_or(default)
-        };
+        let mut next_u32 = |default: u32| it.next().and_then(|v| v.parse().ok()).unwrap_or(default);
         match arg.as_str() {
             "--width" => width = Some(next_u32(1920)),
             "--height" => height = Some(next_u32(1200)),
@@ -90,8 +88,7 @@ fn parse_args() -> Args {
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 

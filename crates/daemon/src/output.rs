@@ -161,7 +161,7 @@ impl VirtualOutput {
                     let lua = format!(
                         "hl.monitor({{ output = \"{name}\", \
                          mode = \"{width}x{height}@{refresh}\", \
-                         position = \"{x}x{y}\", scale = 1 }})"
+                         position = \"auto\", scale = 1 }})"
                     );
                     run("hyprctl", &["eval", &lua])
                         .with_context(|| format!("configuring output as {lua}"))?;

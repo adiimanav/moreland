@@ -19,6 +19,7 @@ use gstreamer::prelude::*;
 use gstreamer_allocators::prelude::*;
 use gstreamer_allocators::DmaBufAllocator;
 use gstreamer_app::{AppSink, AppSrc};
+use gstreamer_video::{VideoFormat, VideoFrameFlags, VideoMeta};
 use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
@@ -159,6 +160,8 @@ pub struct Encoder {
     appsink: AppSink,
     allocator: DmaBufAllocator,
     frame_size: usize,
+    width: u32,
+    height: u32,
 }
 
 impl Encoder {
@@ -277,6 +280,8 @@ impl Encoder {
             // Conservative upper bound; the kernel clamps the mapping to the
             // real dmabuf size and tiled layouts are never larger than this.
             frame_size: (config.width as usize) * (config.height as usize) * 4,
+            width: config.width,
+            height: config.height,
         })
     }
 
@@ -285,7 +290,13 @@ impl Encoder {
     /// `alloc_dmabuf` takes ownership of the fd and closes it with the memory,
     /// so the fd is duplicated first — otherwise GStreamer would close the
     /// capture pool's buffer out from under the compositor.
-    pub fn push_frame(&self, fd: BorrowedFd<'_>, pts_ns: u64) -> Result<()> {
+    pub fn push_frame(
+        &self,
+        fd: BorrowedFd<'_>,
+        offset: u32,
+        stride: u32,
+        pts_ns: u64,
+    ) -> Result<()> {
         let owned = fd
             .try_clone_to_owned()
             .context("duplicating DMA-BUF fd for the encoder")?;
@@ -299,6 +310,18 @@ impl Encoder {
         {
             let buffer = buffer.get_mut().unwrap();
             buffer.append_memory(memory);
+
+            VideoMeta::add_full(
+                buffer,
+                VideoFrameFlags::empty(),
+                VideoFormat::DmaDrm,
+                self.width,
+                self.height,
+                &[offset as usize],
+                &[stride as i32],
+            )
+            .context("adding DMA-BUF VideoMeta")?;
+
             buffer.set_pts(gst::ClockTime::from_nseconds(pts_ns));
         }
 

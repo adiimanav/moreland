@@ -12,7 +12,6 @@
 
 use anyhow::{Context, Result};
 use capture::session::{BufferMode, Capture, CaptureConfig};
-use capture::FALLBACK_MODIFIERS;
 use encoder::{Encoder, EncoderConfig};
 use std::collections::VecDeque;
 use std::io::Write;
@@ -49,7 +48,7 @@ fn main() -> Result<()> {
     let capture_config = CaptureConfig {
         mode: BufferMode::Dmabuf,
         pool_size: 3,
-        allowed_modifiers: FALLBACK_MODIFIERS.to_vec(),
+        allowed_modifiers: encoder::supported_modifiers(capture::XR24),
     };
     let mut capture = Capture::new(&output, &capture_config)?;
 
@@ -140,7 +139,7 @@ fn main() -> Result<()> {
     for i in 0..20u64 {
         let timing = capture.capture_frame()?;
         let dmabuf = capture.dmabuf(timing.buffer_index).unwrap();
-        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), i * frame_duration_ns)?;
+        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, i * frame_duration_ns)?;
     }
     std::thread::sleep(Duration::from_millis(200));
     submitted.lock().unwrap().clear();
@@ -154,7 +153,7 @@ fn main() -> Result<()> {
             .context("capture returned no DMA-BUF")?;
         let pts = (i + 100) * frame_duration_ns;
         submitted.lock().unwrap().push_back(Instant::now());
-        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), pts)?;
+        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, pts)?;
     }
     let wall = wall_start.elapsed();
 

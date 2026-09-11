@@ -105,16 +105,149 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
-pub fn output_exists(compositor: Compositor, name: &str) -> bool {
-    match compositor {
-        Compositor::Hyprland => run("hyprctl", &["monitors", "all"])
-            .map(|out| out.contains(name))
-            .unwrap_or(false),
-        Compositor::Sway => run("swaymsg", &["-t", "get_outputs"])
-            .map(|out| out.contains(name))
-            .unwrap_or(false),
-        Compositor::Unsupported => false,
+#[derive(Debug, Clone)]
+struct MonitorState {
+    name: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    refresh_rate: f64,
+    scale: f64,
+    transform: i32,
+}
+
+fn hyprland_monitor_state() -> Result<Vec<MonitorState>> {
+    let json =
+        run("hyprctl", &["monitors", "-j"]).context("reading Hyprland monitor state")?;
+
+    let monitors: serde_json::Value =
+        serde_json::from_str(&json).context("parsing Hyprland monitor JSON")?;
+
+    let monitors = monitors
+        .as_array()
+        .context("Hyprland monitor JSON is not an array")?;
+
+    let mut states = Vec::with_capacity(monitors.len());
+
+    for monitor in monitors {
+        let name = monitor
+            .get("name")
+            .and_then(|v| v.as_str())
+            .context("Hyprland monitor has no name")?;
+
+        let x = monitor
+            .get("x")
+            .and_then(|v| v.as_i64())
+            .context("Hyprland monitor has no x position")?;
+
+        let y = monitor
+            .get("y")
+            .and_then(|v| v.as_i64())
+            .context("Hyprland monitor has no y position")?;
+
+        let width = monitor
+            .get("width")
+            .and_then(|v| v.as_u64())
+            .context("Hyprland monitor has no width")?;
+
+        let height = monitor
+            .get("height")
+            .and_then(|v| v.as_u64())
+            .context("Hyprland monitor has no height")?;
+
+        let refresh_rate = monitor
+            .get("refreshRate")
+            .and_then(|v| v.as_f64())
+            .context("Hyprland monitor has no refresh rate")?;
+
+        let scale = monitor
+            .get("scale")
+            .and_then(|v| v.as_f64())
+            .context("Hyprland monitor has no scale")?;
+
+        let transform = monitor
+            .get("transform")
+            .and_then(|v| v.as_i64())
+            .context("Hyprland monitor has no transform")?;
+
+        states.push(MonitorState {
+            name: name.to_string(),
+            x: i32::try_from(x).context("Hyprland monitor x position is out of range")?,
+            y: i32::try_from(y).context("Hyprland monitor y position is out of range")?,
+            width: u32::try_from(width).context("Hyprland monitor width is out of range")?,
+            height: u32::try_from(height).context("Hyprland monitor height is out of range")?,
+            refresh_rate,
+            scale,
+            transform: i32::try_from(transform)
+                .context("Hyprland monitor transform is out of range")?,
+        });
     }
+
+    Ok(states)
+}
+
+fn lua_string(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            _ => escaped.push(ch),
+        }
+    }
+
+    escaped.push('"');
+    escaped
+}
+
+fn restore_hyprland_monitor_state(
+    states: &[MonitorState],
+    excluded_output: &str,
+) -> Result<()> {
+    let mut lua = String::new();
+
+    for monitor in states {
+        if monitor.name == excluded_output {
+            continue;
+        }
+
+        let refresh = format!("{:.6}", monitor.refresh_rate)
+            .trim_end_matches('0')
+            .trim_end_matches('.')
+            .to_string();
+
+        let output = lua_string(&monitor.name);
+
+        lua.push_str(&format!(
+            "hl.monitor({{ output = {}, \
+             mode = \"{}x{}@{}\", \
+             position = \"{}x{}\", \
+             scale = {}, \
+             transform = {} }}); ",
+            output,
+            monitor.width,
+            monitor.height,
+            refresh,
+            monitor.x,
+            monitor.y,
+            monitor.scale,
+            monitor.transform
+        ));
+    }
+
+    if lua.ends_with("; ") {
+        lua.truncate(lua.len() - 2);
+    }
+
+    run("hyprctl", &["eval", &lua]).context("restoring Hyprland monitor state")?;
+
+    Ok(())
 }
 
 /// A headless output, removed when dropped.
@@ -135,8 +268,11 @@ impl VirtualOutput {
         let compositor = Compositor::detect();
         match compositor {
             Compositor::Hyprland => {
-                if output_exists(compositor, name) {
-                    tracing::info!("reusing existing output {name}");
+                let saved_states = hyprland_monitor_state()
+                    .context("saving Hyprland monitor state")?;
+
+                if saved_states.iter().any(|monitor| monitor.name == name) {
+                    tracing::debug!("reusing existing output {name}");
                 } else {
                     // Hyprland accepts an explicit name here, so the result is
                     // deterministic. Without one it allocates HEADLESS-N from a
@@ -146,26 +282,30 @@ impl VirtualOutput {
                         .context("creating headless output")?;
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
+
                 let spec = format!("{name},{width}x{height}@{refresh},{x}x{y},1");
                 let reply = run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
+
                 // Hyprland's Lua config parser (0.56+) refuses `keyword`
-                // outright — and refuses it on *stdout with a zero exit
-                // status*, so `run` reports success and the output silently
-                // keeps the compositor's defaults: `auto` scale, which on a
-                // headless output (physical size 0x0) resolves to 2, and
-                // `auto` position. Re-issue the same rule through `eval`,
-                // which that parser does accept. Syntax errors there exit
-                // non-zero, so `run` still catches a genuinely broken rule.
+                // outright — and refuses it on stdout with a zero exit
+                // status, so `run` reports success and the output silently
+                // keeps the compositor's defaults. Re-issue the same rule
+                // through `eval`, which that parser does accept.
                 if reply.contains("non-legacy parsers") {
+                    let output = lua_string(name);
                     let lua = format!(
-                        "hl.monitor({{ output = \"{name}\", \
+                        "hl.monitor({{ output = {}, \
                          mode = \"{width}x{height}@{refresh}\", \
-                         position = \"{x}x{y}\", scale = 1 }})"
+                         position = \"{x}x{y}\", scale = 1 }})",
+                        output
                     );
                     run("hyprctl", &["eval", &lua])
                         .with_context(|| format!("configuring output as {lua}"))?;
                 }
+
+                restore_hyprland_monitor_state(&saved_states, name)
+                    .context("restoring Hyprland monitor state")?;
             }
             // Sway is UNTESTED and everything else is unsupported; both cases
             // report themselves.
@@ -191,7 +331,7 @@ impl Drop for VirtualOutput {
             Compositor::Unsupported => return,
         };
         match result {
-            Ok(_) => tracing::info!("removed output {}", self.name),
+            Ok(_) => tracing::debug!("removed output {}", self.name),
             Err(e) => tracing::warn!("failed to remove output {}: {e}", self.name),
         }
     }

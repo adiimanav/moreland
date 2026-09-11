@@ -46,10 +46,11 @@ impl Default for Config {
             // saturates: 163 of 1764 frames unacked and a 208 ms stall.
             fps: 90,
             bitrate_kbps: 20_000,
-            // Left of a primary at 0x0: the output spans [-width, 0), so the
-            // origin is -width. Negative because Hyprland places the primary
-            // at 0x0 and grows the layout both ways from there. Override with
-            // `--position` to sit on the right instead.
+            // Below a primary at 0x0, starting at y = 1080. This assumes the
+            // primary is no taller than 1080px — on a taller display the
+            // virtual output would overlap it rather than sit below. Override
+            // with `--position`/`--position-y` if that does not hold for your
+            // layout.
             position_x: 0,
             position_y: 1080,
             output_name: capture::VIRTUAL_OUTPUT_NAME.to_string(),

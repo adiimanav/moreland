@@ -15,9 +15,8 @@ the VA-API encoder and the ADB link, and names what blocks you.
 |---|---|
 | Compositor | Hyprland 0.56.2 |
 | GPU | AMD Cezanne / Vega (VCN 2.x), VA-API |
-| Host OS | EndeavourOS / Arch, kernel 7.1 |
-| Tablet | Xiaomi Pad 6 (Snapdragon 870), Android 14 |
-| Link | USB 2.0 |
+| Host OS | Arch / EndeavourOS |
+| Android client | Android 14 / API 34 |
 
 ## What is actually compositor-specific
 
@@ -47,7 +46,8 @@ hyprctl output remove moreland
 Hyprland accepts an **explicit name**, which makes the result deterministic.
 That matters more than it sounds: the unnamed form allocates `HEADLESS-N` from
 a counter that persists across creates and never resets, so any code guessing
-the name is a latent bug. It bit this project during development.
+the name is a latent bug. This avoids relying on automatically allocated
+output names.
 
 ### Sway and wlroots compositors — likely straightforward, unimplemented
 
@@ -67,7 +67,7 @@ pretending.
 
 ### KDE Plasma / KWin — tested, blocked
 
-Tested on **KWin 6.7.4**, Plasma 6.7.4, Wayland session, EndeavourOS. Both
+Tested on **KWin 6.7.4 / Plasma 6.7.4** in a Wayland session. Both
 questions this section used to pose are now answered.
 
 **1. Does KWin implement `ext-image-copy-capture-v1`? No.**
@@ -113,10 +113,9 @@ entry:
 X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
 ```
 
-Verified by A/B/A test on KWin 6.7.4: a user entry under
-`~/.local/share/applications` is enough, so this needs **no root**, and KWin
-matches the client's executable path rather than how it was launched, so a
-systemd-launched daemon qualifies. `Exec` must be an absolute path — the bare
+A per-user desktop entry under `~/.local/share/applications` is sufficient;
+no root access is required. KWin matches the client's executable path rather
+than how it was launched. `Exec` must be an absolute path — the bare
 form is silently denied. `install.sh` writes this entry **only on a Plasma
 session**, so a Hyprland install is not littered with it; force it with
 `MORELAND_INSTALL_DESKTOP_ENTRY=1`. The mechanics and the traps are in
@@ -178,12 +177,9 @@ The most portable part of the project.
 - Nothing vendor-specific is required. The Qualcomm low-latency hint is set
   opportunistically and ignored elsewhere
 
-The default **1920×1200** is a clean 1.5× upscale for the Xiaomi Pad 6's
-2880×1800 16:10 panel. For a 16:9 tablet, prefer `--width 1920 --height 1080`;
-a mismatched aspect ratio will letterbox.
-
-USB 2.0 was the measured link here and had **13× headroom**, so USB 3 devices
-gain nothing — bandwidth was never the constraint.
+The default **1920×1200** is appropriate for a 16:10 display. For a 16:9
+tablet, prefer `--width 1920 --height 1080`; a mismatched aspect ratio may
+letterbox.
 
 ## Distributions
 

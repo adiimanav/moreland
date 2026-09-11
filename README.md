@@ -138,8 +138,11 @@ moreland --seconds 15     stop after 15 s and print latency statistics
 --width <PX> --height <PX> pin an explicit resolution (both required)
 --fps <N>                  virtual output refresh rate   [default: 90]
 --bitrate <KBPS>           H.264 target bitrate          [default: 20000]
---position <X>             x offset of the virtual output [default: -1920]
-                           negative sits left of the primary, positive right
+--position <X>             x offset of the virtual output [default: 0]
+--position-y <Y>           y offset of the virtual output [default: 1080]
+                           default sits below a primary at 0x0, no taller
+                           than 1080px; override either axis to fit your
+                           layout
 ```
 
 **Resolution is automatic.** The daemon reads the tablet's panel size over ADB

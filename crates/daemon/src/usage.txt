@@ -14,8 +14,10 @@ OPTIONS
     --fps <N>           virtual output refresh rate    [default: 90]
                         120 measures better still; 144 saturates
     --bitrate <KBPS>    H.264 target bitrate           [default: 20000]
-    --position <X>      x offset of the virtual output [default: -1920]
-                        negative sits left of the primary, positive right
+    --position <X>      x offset of the virtual output [default: 0]
+    --position-y <Y>    y offset of the virtual output [default: 1080]
+                        default sits below a primary at 0x0, no taller than
+                        1080px; override either axis to fit your layout
 
     --once              stream one session, then exit
     --seconds <N>       stop after N seconds (implies --once and --stats)

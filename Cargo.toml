@@ -27,7 +27,7 @@ gbm = "0.18"
 drm-fourcc = "2.2"
 gstreamer = "0.25"
 gstreamer-app = "0.25"
-gstreamer-video = "0.25"
+gstreamer-video = { version = "0.25", features = ["v1_24"] }
 gstreamer-allocators = "0.25"
 capture = { path = "crates/capture" }
 protocol = { path = "crates/protocol" }

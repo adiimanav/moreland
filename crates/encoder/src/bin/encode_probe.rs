@@ -49,6 +49,7 @@ fn main() -> Result<()> {
         mode: BufferMode::Dmabuf,
         pool_size: 3,
         allowed_modifiers: encoder::supported_modifiers(capture::XR24),
+        paint_cursor: false,
     };
     let mut capture = Capture::new(&output, &capture_config)?;
 

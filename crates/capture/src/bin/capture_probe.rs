@@ -86,6 +86,7 @@ fn main() -> Result<()> {
         } else {
             FALLBACK_MODIFIERS.to_vec()
         },
+        paint_cursor: false,
     };
     let mut capture = Capture::new(&target, &config)?;
     println!("  buffer      {}x{}", capture.width, capture.height);

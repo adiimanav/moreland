@@ -52,6 +52,8 @@ pub struct CaptureConfig {
     /// compressed surfaces. The result is not an error but a silent fallback to
     /// a CPU copy, which defeats the entire point of the DMA-BUF path.
     pub allowed_modifiers: Vec<u64>,
+    /// Ask the compositor to composite the mouse cursor into captured frames.
+    pub paint_cursor: bool,
 }
 
 impl Default for CaptureConfig {
@@ -60,6 +62,7 @@ impl Default for CaptureConfig {
             mode: BufferMode::Dmabuf,
             pool_size: 2,
             allowed_modifiers: Vec::new(),
+            paint_cursor: false,
         }
     }
 }
@@ -372,12 +375,12 @@ impl Capture {
         let shm: wl_shm::WlShm = globals.bind(&qh, 1..=2, ()).context("binding wl_shm")?;
 
         let source = source_manager.create_source(&output, &qh, ());
-        let session = capture_manager.create_session(
-            &source,
-            ext_image_copy_capture_manager_v1::Options::empty(),
-            &qh,
-            (),
-        );
+        let options = if config.paint_cursor {
+            ext_image_copy_capture_manager_v1::Options::PaintCursors
+        } else {
+            ext_image_copy_capture_manager_v1::Options::empty()
+        };
+        let session = capture_manager.create_session(&source, options, &qh, ());
 
         while !state.session_done {
             queue.blocking_dispatch(&mut state)?;

@@ -43,15 +43,22 @@ pub enum BufferMode {
 pub struct CaptureConfig {
     pub mode: BufferMode,
     pub pool_size: usize,
-    /// DRM format modifiers the *consumer* of these buffers can accept, in
-    /// preference order. Empty means "let GBM choose".
+    /// DRM formats the *consumer* of these buffers can accept, as
+    /// `(fourcc, modifiers)` pairs in preference order. Empty means "let GBM
+    /// choose".
     ///
     /// This matters more than it looks. Left to itself GBM picks the most
     /// capable modifier the compositor offers, which on AMD is a DCC
     /// (delta-colour-compressed) tiling — and the VCN video encoder cannot read
     /// compressed surfaces. The result is not an error but a silent fallback to
     /// a CPU copy, which defeats the entire point of the DMA-BUF path.
-    pub allowed_modifiers: Vec<u64>,
+    ///
+    /// The modifiers are paired with their fourcc rather than pooled, because
+    /// acceptance is per-format: LINEAR is offered for every format by every
+    /// driver, so a flat list would match a fourcc the consumer cannot read at
+    /// all. That is exactly how issue #3 slipped through on Intel iHD, which
+    /// accepts `AR24` but never `XR24`.
+    pub allowed_formats: Vec<(u32, Vec<u64>)>,
 }
 
 impl Default for CaptureConfig {
@@ -59,7 +66,7 @@ impl Default for CaptureConfig {
         Self {
             mode: BufferMode::Dmabuf,
             pool_size: 2,
-            allowed_modifiers: Vec::new(),
+            allowed_formats: Vec::new(),
         }
     }
 }
@@ -314,7 +321,7 @@ pub struct Capture {
     // Retained so the pool can be rebuilt when the compositor changes its
     // buffer constraints mid-session.
     pool_size: usize,
-    allowed_modifiers: Vec<u64>,
+    allowed_formats: Vec<(u32, Vec<u64>)>,
     geometry_changed: bool,
     shm: wl_shm::WlShm,
     dmabuf: Option<ZwpLinuxDmabufV1>,
@@ -411,7 +418,7 @@ impl Capture {
             modifier: None,
             device_path: None,
             pool_size,
-            allowed_modifiers: config.allowed_modifiers.clone(),
+            allowed_formats: config.allowed_formats.clone(),
             geometry_changed: false,
             shm,
             dmabuf: dmabuf_global,
@@ -468,7 +475,7 @@ impl Capture {
                     .as_ref()
                     .context("DMA-BUF mode without a linux-dmabuf global")?;
                 let (fourcc, modifiers) =
-                    pick_dmabuf_format(&caps.dmabuf_formats, &self.allowed_modifiers)?;
+                    pick_dmabuf_format(&caps.dmabuf_formats, &self.allowed_formats)?;
                 format = fourcc;
 
                 let dev = caps
@@ -697,37 +704,57 @@ fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
     bail!("no supported shm format offered (got: {formats:?})")
 }
 
-/// Prefer XR24 — the virtual output is opaque, and dropping alpha keeps the
-/// encoder's colour conversion trivial.
+/// Pick the format and modifier to allocate the capture pool with.
 ///
-/// When the consumer restricts modifiers, intersect against its list *in the
+/// Both the format preference order and the modifiers acceptable for each
+/// format come from `allowed`, normally built by
+/// `encoder::pick_supported_format`. Keeping them paired is the point: a
+/// modifier only means anything for the format it was advertised against, and
+/// LINEAR is offered for every format by every driver — so matching a flat
+/// modifier list would happily settle on a fourcc the consumer cannot read at
+/// all. On Intel iHD that is not hypothetical: `vapostproc` accepts `AR24` but
+/// never `XR24`, and `XR24` + LINEAR looks like a match right up until
+/// negotiation fails (issue #3).
+///
+/// Within a format, intersect against the consumer's modifiers *in the
 /// consumer's preference order* and return exactly one, so GBM has no room to
 /// substitute something the consumer cannot read.
+///
+/// An empty `allowed` means there is no consumer to defer to — prefer XR24,
+/// since the virtual output is opaque and dropping alpha keeps the encoder's
+/// colour conversion trivial, and let GBM choose the modifier.
 fn pick_dmabuf_format(
     formats: &[(u32, Vec<u64>)],
-    allowed: &[u64],
+    allowed: &[(u32, Vec<u64>)],
 ) -> Result<(u32, Vec<u64>)> {
     const XR24: u32 = fourcc(b"XR24");
     const AR24: u32 = fourcc(b"AR24");
 
-    for wanted in [XR24, AR24] {
-        let Some((fourcc, offered)) = formats.iter().find(|(f, _)| *f == wanted) else {
+    if allowed.is_empty() {
+        for wanted in [XR24, AR24] {
+            if let Some((fourcc, offered)) = formats.iter().find(|(f, _)| *f == wanted) {
+                return Ok((*fourcc, offered.clone()));
+            }
+        }
+        bail!("no supported DMA-BUF format offered");
+    }
+
+    for (wanted, acceptable) in allowed {
+        let Some((fourcc, offered)) = formats.iter().find(|(f, _)| f == wanted) else {
             continue;
         };
-        if allowed.is_empty() {
-            return Ok((*fourcc, offered.clone()));
-        }
-        if let Some(modifier) = allowed.iter().find(|m| offered.contains(m)) {
+        if let Some(modifier) = acceptable.iter().find(|m| offered.contains(m)) {
             return Ok((*fourcc, vec![*modifier]));
         }
     }
 
-    if allowed.is_empty() {
-        bail!("no supported DMA-BUF format offered");
-    }
     bail!(
-        "compositor and consumer share no DMA-BUF modifier \
-         (consumer accepts {allowed:02x?}, compositor offers {:02x?})",
+        "compositor and consumer share no DMA-BUF format and modifier \
+         (consumer accepts {:02x?}, compositor offers {:02x?})",
+        allowed
+            .iter()
+            .map(|(f, m)| (fourcc_name(*f), m))
+            .collect::<Vec<_>>(),
         formats
             .iter()
             .map(|(f, m)| (fourcc_name(*f), m))
@@ -735,7 +762,8 @@ fn pick_dmabuf_format(
     )
 }
 
-fn fourcc_name(code: u32) -> String {
+/// Render a DRM fourcc as its four ASCII bytes, or hex if it is not printable.
+pub fn fourcc_name(code: u32) -> String {
     let bytes = code.to_le_bytes();
     if bytes.iter().all(|b| b.is_ascii_graphic()) {
         String::from_utf8_lossy(&bytes).into_owned()

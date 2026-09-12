@@ -45,15 +45,24 @@ fn main() -> Result<()> {
     }
     let output = output.context("usage: encode-probe <output> [--frames N]")?;
 
+    let (fourcc, modifiers) = encoder::pick_supported_format(&[capture::XR24, capture::AR24])
+        .context("encoder accepts neither XR24 nor AR24 DMA-BUF frames")?;
+
     let capture_config = CaptureConfig {
         mode: BufferMode::Dmabuf,
         pool_size: 3,
-        allowed_modifiers: encoder::supported_modifiers(capture::XR24),
+        allowed_formats: vec![(fourcc, modifiers)],
     };
     let mut capture = Capture::new(&output, &capture_config)?;
 
     println!("=== Capture ===");
-    println!("  {}x{}  modifier 0x{:016x}", capture.width, capture.height, capture.modifier.unwrap_or(0));
+    println!(
+        "  {}x{}  format {}  modifier 0x{:016x}",
+        capture.width,
+        capture.height,
+        capture::session::fourcc_name(capture.format),
+        capture.modifier.unwrap_or(0)
+    );
 
     let encoder_config = EncoderConfig {
         width: capture.width,

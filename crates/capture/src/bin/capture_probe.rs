@@ -6,8 +6,8 @@
 //!   capture-probe <output> [--dmabuf|--shm] [--frames N] [--png PATH]
 
 use anyhow::{Context, Result};
-use capture::session::{BufferMode, Capture, CaptureConfig};
-use capture::{discovery, FALLBACK_MODIFIERS, REQUIRED_GLOBALS};
+use capture::session::{fourcc_name, BufferMode, Capture, CaptureConfig};
+use capture::{discovery, AR24, FALLBACK_MODIFIERS, REQUIRED_GLOBALS, XR24};
 use std::time::Duration;
 
 struct Args {
@@ -81,10 +81,13 @@ fn main() -> Result<()> {
     let config = CaptureConfig {
         mode: args.mode,
         pool_size: 2,
-        allowed_modifiers: if args.any_modifier {
+        allowed_formats: if args.any_modifier {
             Vec::new()
         } else {
-            FALLBACK_MODIFIERS.to_vec()
+            vec![
+                (XR24, FALLBACK_MODIFIERS.to_vec()),
+                (AR24, FALLBACK_MODIFIERS.to_vec()),
+            ]
         },
     };
     let mut capture = Capture::new(&target, &config)?;
@@ -201,13 +204,4 @@ fn write_png(path: &str, pixels: &[u8], stride: u32, width: u32, height: u32) ->
         .write_image_data(&rgb)
         .context("writing PNG data")?;
     Ok(())
-}
-
-fn fourcc_name(code: u32) -> String {
-    let bytes = code.to_le_bytes();
-    if bytes.iter().all(|b| b.is_ascii_graphic()) {
-        String::from_utf8_lossy(&bytes).into_owned()
-    } else {
-        format!("0x{code:08x}")
-    }
 }

@@ -23,9 +23,17 @@ pub const VIRTUAL_OUTPUT_NAME: &str = "moreland";
 /// `XR24` — opaque 8-bit BGRX, the format captured from the virtual output.
 pub const XR24: u32 = u32::from_le_bytes(*b"XR24");
 
+/// `AR24` — 8-bit BGRA, the fallback when the encoder cannot import [`XR24`].
+///
+/// Intel's iHD driver advertises `AR24` and `XB24` on `vapostproc`'s
+/// `memory:DMABuf` sink pad but never `XR24` (issue #3), so a pipeline pinned
+/// to `XR24` fails negotiation there outright. The alpha channel is ignored
+/// either way — the virtual output is opaque.
+pub const AR24: u32 = u32::from_le_bytes(*b"AR24");
+
 /// Fallback modifiers when the encoder cannot be probed.
 ///
-/// Prefer [`encoder::supported_modifiers`], which asks the local VA stack what
+/// Prefer `encoder::pick_supported_format`, which asks the local VA stack what
 /// it can import. A hardcoded set is correct on exactly one GPU: compositors
 /// offer modifiers the encoder cannot read — on AMD, DCC-compressed tilings —
 /// and GBM will happily prefer one, silently degrading the zero-copy path to a

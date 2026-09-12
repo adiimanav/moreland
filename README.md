@@ -53,7 +53,8 @@ to have it silently not hold. See [Multi-GPU hosts](#multi-gpu-hosts).
 
 **Host**
 
-- Hyprland (see [Compatibility](#compatibility) for others)
+- Hyprland, or labwc with `wlr-randr` (see [Compatibility](#compatibility) for
+  others)
 - A GPU with VA-API encode - AMD, Intel, or NVIDIA via `nvidia-vaapi-driver`
 - `gstreamer`, `gst-plugins-base`, `gst-plugin-va`, `libva`
 - `android-tools` (adb), Rust toolchain
@@ -143,6 +144,10 @@ moreland --seconds 15     stop after 15 s and print latency statistics
                            default sits below a primary at 0x0, no taller
                            than 1080px; override either axis to fit your
                            layout
+--output-name <NAME>       name of the virtual output    [default: moreland]
+                           required on labwc, which cannot create one and
+                           must be pointed at an existing headless output
+--show-cursor              composite the mouse cursor into the stream
 ```
 
 **Resolution is automatic.** The daemon reads the tablet's panel size over ADB
@@ -236,7 +241,8 @@ terminals, and browsing; it is not fine for gaming or stylus work.
 |                       | Status                                                                                              |
 | --------------------- | --------------------------------------------------------------------------------------------------- |
 | **Hyprland**          | Verified, including 0.56's Lua config parser (see below)                                            |
-| Sway / wlroots        | Capture should work unchanged; output creation unimplemented                                        |
+| labwc                 | Works, contributed and used by its author, untested here - you create the headless output, moreland attaches to it ([details](docs/COMPATIBILITY.md#labwc--works-with-the-output-created-by-you)) |
+| Sway / other wlroots  | Capture should work unchanged; output creation unimplemented                                        |
 | KDE Plasma (KWin)     | **Blocked, tested on KWin 6.7.4** - implements no `ext-`/`wlr-` capture protocol; needs a PipeWire backend |
 | GNOME (Mutter)        | Requires a portal/PipeWire capture backend; Mutter implements neither wlr nor ext capture protocols |
 | AMD VA-API            | Verified                                                                                            |
@@ -371,7 +377,8 @@ Full inventory in [`docs/REVERT.md`](docs/REVERT.md).
 
 Especially wanted:
 
-- **Compositor backends** - Sway is the smallest step; KWin the most requested
+- **Compositor backends** - Sway is the smallest step (labwc is done); KWin the
+  most requested
 - **A portal/PipeWire capture backend**, which would make GNOME and KDE work at once
 - **Intel and NVIDIA reports**, positive or negative
 - **Touch input** via `zwlr_virtual_pointer_v1`

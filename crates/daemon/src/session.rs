@@ -137,16 +137,22 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     std::thread::sleep(Duration::from_millis(2500));
 
     // Probe what this machine's encoder can actually import rather than
-    // assuming; the accepted modifier set is GPU-vendor specific.
-    let allowed_modifiers = encoder::supported_modifiers(capture::XR24);
-    tracing::debug!("encoder accepts modifiers {allowed_modifiers:02x?}");
+    // assuming; both the format and its modifiers are GPU-vendor specific.
+    // XR24 first — the output is opaque, so alpha is wasted work — then AR24,
+    // which is all Intel's iHD driver offers for 8-bit RGB (issue #3).
+    let (fourcc, modifiers) = encoder::pick_supported_format(&[capture::XR24, capture::AR24])
+        .context("encoder accepts neither XR24 nor AR24 DMA-BUF frames")?;
+    tracing::debug!(
+        "encoder accepts {} with modifiers {modifiers:02x?}",
+        capture::session::fourcc_name(fourcc)
+    );
 
     let mut capture = Capture::new(
         output.name(),
         &CaptureConfig {
             mode: BufferMode::Dmabuf,
             pool_size: 3,
-            allowed_modifiers,
+            allowed_formats: vec![(fourcc, modifiers)],
         },
     )?;
     let encoder = Arc::new(Encoder::new(&EncoderConfig {

@@ -87,8 +87,14 @@ back to a CPU copy: no error, no warning, just a quietly broken zero-copy path.
 
 `vapostproc` advertises exactly one XR24 modifier on its `memory:DMABuf` sink
 pad — `0x0200000000000901` — and the compositor's 11-modifier list happens to
-include it. `CaptureConfig::allowed_modifiers` intersects the two and pins the
+include it. `CaptureConfig::allowed_formats` intersects the two and pins the
 result to a single value so GBM cannot substitute.
+
+(That is this GPU. On Intel iHD `vapostproc` advertises no XR24 modifier at all,
+only `AR24` and `XB24`, so the negotiated format there is `AR24` — see issue #3.
+The modifiers are carried per-format rather than pooled for exactly this reason:
+LINEAR is offered for every format by every driver, so a shared list would match
+a format the encoder cannot read.)
 
 Measured cost of the constraint:
 

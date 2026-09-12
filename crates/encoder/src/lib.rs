@@ -32,8 +32,14 @@ use std::time::Duration;
 /// which defeats the whole zero-copy pipeline. The accepted set is also
 /// vendor-specific, so a hardcoded value works on exactly one machine.
 ///
-/// LINEAR is appended as a universal fallback.
-pub fn supported_modifiers(fourcc: u32) -> Vec<u64> {
+/// `None` means `vapostproc` never mentions `fourcc` at all, so the format is
+/// unusable here at *any* modifier. That case is real rather than theoretical:
+/// on Intel iHD the sink caps carry `AR24` and `XB24` but no `XR24` (issue #3).
+/// It also covers a missing VA plugin. Neither is something LINEAR rescues, so
+/// the fallback below is appended only for a format the encoder does advertise
+/// — claiming LINEAR support for a format that was never offered is what turns
+/// this into a `not-negotiated` failure several layers downstream.
+pub fn supported_modifiers(fourcc: u32) -> Option<Vec<u64>> {
     let wanted = fourcc_name(fourcc);
     let mut modifiers = Vec::new();
 
@@ -57,10 +63,34 @@ pub fn supported_modifiers(fourcc: u32) -> Vec<u64> {
         }
     }
 
+    finish_modifiers(modifiers)
+}
+
+/// Turn the raw probe result into an answer: nothing found means the format is
+/// unusable, anything found gets LINEAR as a universal fallback.
+///
+/// Split out from [`supported_modifiers`] because that function's probe needs a
+/// live `vapostproc`, and this decision — the one issue #3 turned on — does not.
+fn finish_modifiers(mut modifiers: Vec<u64>) -> Option<Vec<u64>> {
+    if modifiers.is_empty() {
+        return None;
+    }
     if !modifiers.contains(&0) {
         modifiers.push(0); // DRM_FORMAT_MOD_LINEAR
     }
-    modifiers
+    Some(modifiers)
+}
+
+/// The first of `candidates` this machine's encoder chain can actually import,
+/// paired with the modifiers it accepts for it.
+///
+/// `candidates` is in preference order: pass the format you would rather have
+/// first. `None` means none of them are importable, which is fatal — there is
+/// no format left to negotiate with.
+pub fn pick_supported_format(candidates: &[u32]) -> Option<(u32, Vec<u64>)> {
+    candidates
+        .iter()
+        .find_map(|&fourcc| supported_modifiers(fourcc).map(|modifiers| (fourcc, modifiers)))
 }
 
 /// `drm-format` is either a single string or a list of `FOURCC:0xMODIFIER`.
@@ -103,7 +133,10 @@ pub struct EncoderConfig {
     pub height: u32,
     pub framerate: u32,
     pub bitrate_kbps: u32,
-    /// DRM fourcc of the incoming frames (e.g. `XR24`).
+    /// DRM fourcc of the incoming frames, negotiated rather than assumed:
+    /// `XR24` wherever the encoder accepts it, `AR24` on GPUs whose
+    /// `vapostproc` never lists `XR24` at all (Intel iHD — issue #3). See
+    /// [`pick_supported_format`].
     pub fourcc: u32,
     /// DRM format modifier of the incoming frames.
     pub modifier: u64,
@@ -387,4 +420,110 @@ impl Drop for Encoder {
 
 fn fourcc_name(code: u32) -> String {
     String::from_utf8_lossy(&code.to_le_bytes()).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `vapostproc`'s `memory:DMABuf` sink caps on Intel iHD 26.2.4, copied
+    /// verbatim from the `GST_DEBUG` dump @camradex attached to issue #3
+    /// (Alder Lake-UP3 GT2 UHD Graphics).
+    ///
+    /// The entry that matters is the one that is *absent*: there is no `XR24`
+    /// anywhere in this list, at any modifier. Hyprland exports the virtual
+    /// output as `XR24`, so pinning the pipeline to it here fails negotiation
+    /// before a single frame moves. `AR24` is the format iHD does accept.
+    const INTEL_IHD_DRM_FORMATS: &[&str] = &[
+        "NV12:0x0100000000000002",
+        "YU12",
+        "YV12",
+        "YUYV:0x0100000000000002",
+        "YU16:0x0100000000000002",
+        "AB24:0x0100000000000002",
+        "AR24:0x0100000000000002",
+        "XB24:0x0100000000000002",
+        "P010:0x0100000000000002",
+        "AR30:0x0100000000000002",
+        "AYUV:0x0100000000000002",
+        "Y210:0x0100000000000002",
+        "Y410:0x0100000000000002",
+        "P012:0x0100000000000002",
+        "Y212:0x0100000000000002",
+        "Y412:0x0100000000000002",
+    ];
+
+    #[test]
+    fn parses_ar24_modifier_from_intel_ihd_caps() {
+        assert_eq!(
+            parse_drm_format("AR24:0x0100000000000002", "AR24"),
+            Some(0x0100_0000_0000_0002)
+        );
+    }
+
+    #[test]
+    fn intel_ihd_caps_never_mention_xr24() {
+        // The root cause of issue #3: no entry in iHD's advertised set matches
+        // XR24, so probing XR24 alone leaves nothing to negotiate with.
+        for entry in INTEL_IHD_DRM_FORMATS {
+            assert_eq!(
+                parse_drm_format(entry, "XR24"),
+                None,
+                "{entry} unexpectedly matched XR24"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_fourcc_without_a_modifier_means_linear() {
+        // iHD lists YU12 and YV12 with no `:0x...` suffix at all.
+        assert_eq!(parse_drm_format("YU12", "YU12"), Some(0));
+        assert_eq!(parse_drm_format("YV12", "YV12"), Some(0));
+    }
+
+    #[test]
+    fn amd_tiled_modifier_still_parses() {
+        // The AMD GFX9 tiled (no DCC) modifier this project runs on today, to
+        // keep the Intel fix from regressing the verified path.
+        assert_eq!(
+            parse_drm_format("XR24:0x0200000000000901", "XR24"),
+            Some(0x0200_0000_0000_0901)
+        );
+    }
+
+    #[test]
+    fn an_unadvertised_format_is_unusable_rather_than_linear() {
+        // The fix for issue #3. Before it, an empty probe result was padded
+        // with LINEAR and returned as if the format worked, which then failed
+        // negotiation inside vapostproc with nothing left to fall back to.
+        assert_eq!(finish_modifiers(Vec::new()), None);
+    }
+
+    #[test]
+    fn linear_is_appended_only_to_a_format_that_was_advertised() {
+        assert_eq!(
+            finish_modifiers(vec![0x0100_0000_0000_0002]),
+            Some(vec![0x0100_0000_0000_0002, 0])
+        );
+        // Already present, so not duplicated.
+        assert_eq!(finish_modifiers(vec![0]), Some(vec![0]));
+    }
+
+    #[test]
+    fn collects_ar24_but_not_xr24_from_intel_ihd_caps() {
+        // One level up from parse_drm_format: the list traversal that
+        // supported_modifiers actually feeds from. Built by hand rather than
+        // probed, so this runs anywhere — no VA-API driver, no Intel GPU.
+        gst::init().expect("initialising GStreamer");
+        let list = gst::List::new(INTEL_IHD_DRM_FORMATS.iter().map(|s| s.to_string()));
+        let value = gst::glib::Value::from(list);
+
+        let mut ar24 = Vec::new();
+        collect_modifiers(&value, "AR24", &mut ar24);
+        assert_eq!(ar24, vec![0x0100_0000_0000_0002]);
+
+        let mut xr24 = Vec::new();
+        collect_modifiers(&value, "XR24", &mut xr24);
+        assert!(xr24.is_empty(), "XR24 matched {xr24:02x?} on iHD caps");
+    }
 }

@@ -159,12 +159,17 @@ The encoder chain is `vapostproc` → `vah264enc`, which works on any GPU with a
 VA-API driver — AMD (VCN), Intel (QuickSync), and NVIDIA via `nvidia-vaapi-driver`.
 
 The one thing that *was* hardcoded is now probed at runtime:
-`encoder::supported_modifiers()` asks the local VA stack which DRM format
-modifiers it can import, instead of assuming AMD's. This matters because
-compositors offer modifiers the encoder cannot read — on AMD, DCC-compressed
-tilings — and GBM will happily prefer one. The failure mode is not an error but
-a **silent fallback to a CPU copy**, which quietly destroys the zero-copy
-design. A hardcoded modifier is correct on exactly one GPU.
+`encoder::pick_supported_format()` asks the local VA stack which DRM format it
+can import and which modifiers it accepts for it, instead of assuming AMD's.
+This matters because compositors offer modifiers the encoder cannot read — on
+AMD, DCC-compressed tilings — and GBM will happily prefer one. The failure mode
+is not an error but a **silent fallback to a CPU copy**, which quietly destroys
+the zero-copy design. A hardcoded modifier is correct on exactly one GPU.
+
+The format itself needs the same treatment, for a blunter reason: Intel's iHD
+driver advertises `AR24` and `XB24` on `vapostproc`'s DMA-BUF sink pad and no
+`XR24` at all, so a pipeline pinned to `XR24` does not degrade — it fails
+negotiation outright (issue #3). `XR24` is still preferred where it is offered.
 
 Untested on Intel and NVIDIA. The probing makes it plausible, not proven.
 

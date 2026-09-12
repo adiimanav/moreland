@@ -7,6 +7,8 @@ bitstream on the GPU, without the pixels ever reaching the CPU.
 
 ## Pipeline
 
+The common (AMD) case:
+
 ```
 appsrc      video/x-raw(memory:DMABuf), format=DMA_DRM,
             drm-format=XR24:0x0200000000000901
@@ -17,6 +19,14 @@ appsrc      video/x-raw(memory:DMABuf), format=DMA_DRM,
   -> capsfilter   byte-stream / au
   -> appsink
 ```
+
+The `drm-format` here is negotiated, not fixed. `encoder::pick_supported_format`
+asks `vapostproc` which of `XR24` then `AR24` it can actually import, and pairs
+the winner with the modifiers advertised for *that* format. `XR24` is preferred
+— the virtual output is opaque, so alpha is wasted work — but it is not always
+on offer: Intel's iHD driver lists `AR24` and `XB24` on its `memory:DMABuf` sink
+pad and no `XR24` at all, so on that GPU the first element of the chain reads
+`drm-format=AR24:...` instead (issue #3).
 
 `vah264enc` reports `device-path = /dev/dri/renderD129` — the same GPU the
 compositor allocates capture buffers on, so the whole chain stays on one device.

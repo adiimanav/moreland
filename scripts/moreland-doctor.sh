@@ -38,12 +38,20 @@ if { [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] \
 elif { [ -n "${SWAYSOCK:-}" ] || [ "${XDG_CURRENT_DESKTOP:-}" = "sway" ]; } \
      && swaymsg -t get_version >/dev/null 2>&1; then
     COMPOSITOR="Sway"
+elif { [ "${XDG_CURRENT_DESKTOP:-}" = "labwc" ] \
+       || [ "${XDG_CURRENT_DESKTOP:-}" = "wlroots" ]; } \
+     && wlr-randr >/dev/null 2>&1; then
+    COMPOSITOR="labwc"
 fi
 
 case "$COMPOSITOR" in
     Hyprland) pass "compositor: Hyprland — supported, verified" ;;
     Sway)     warn "compositor: Sway — capture should work, output creation unimplemented"
               block "Sway virtual-output creation is not implemented" ;;
+    labwc)    pass "compositor: labwc — supported, community-tested"
+              info "labwc cannot create an output at runtime. Start it with"
+              info "WLR_HEADLESS_OUTPUTS=1 and pass the name wlr-randr lists"
+              info "(usually HEADLESS-1) as: moreland --output-name HEADLESS-1" ;;
     *)        fail "compositor: ${XDG_CURRENT_DESKTOP:-unknown} — no virtual-output backend"
               block "no virtual-output backend for ${XDG_CURRENT_DESKTOP:-unknown}" ;;
 esac

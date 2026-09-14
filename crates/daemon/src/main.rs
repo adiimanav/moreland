@@ -55,6 +55,12 @@ fn parse_args() -> Args {
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(config.position_y);
             }
+            "--output-name" => {
+                if let Some(name) = it.next() {
+                    config.output_name = name;
+                }
+            }
+            "--show-cursor" => config.paint_cursor = true,
             "--once" => once = true,
             "--stats" => config.stats = true,
             "--seconds" => {

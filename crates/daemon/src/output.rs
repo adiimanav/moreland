@@ -23,6 +23,10 @@ pub enum Compositor {
     Hyprland,
     /// wlroots-based with a Sway-compatible IPC (`swaymsg create_output`).
     Sway,
+    /// labwc, queried through `wlr-randr`. Unlike the other two it has no
+    /// runtime IPC to *create* an output, so the session attaches to one the
+    /// compositor was started with. See `docs/COMPATIBILITY.md`.
+    Labwc,
     Unsupported,
 }
 
@@ -51,6 +55,16 @@ impl Compositor {
         {
             return Compositor::Sway;
         }
+        // labwc has reported itself as both `labwc` and the generic `wlroots`
+        // depending on version, so neither value alone identifies it. The
+        // confirming round-trip is `wlr-randr`, which is also how this backend
+        // reads output state later: if it cannot list outputs now, the backend
+        // could not work anyway.
+        if (desktop.eq_ignore_ascii_case("labwc") || desktop.eq_ignore_ascii_case("wlroots"))
+            && run("wlr-randr", &[]).is_ok()
+        {
+            return Compositor::Labwc;
+        }
         Compositor::Unsupported
     }
 
@@ -58,6 +72,7 @@ impl Compositor {
         match self {
             Compositor::Hyprland => "Hyprland",
             Compositor::Sway => "Sway",
+            Compositor::Labwc => "labwc",
             Compositor::Unsupported => "unsupported",
         }
     }
@@ -73,6 +88,7 @@ impl Compositor {
                  itself, so the daemon must diff `swaymsg -t get_outputs` to \
                  discover it. See docs/COMPATIBILITY.md."
             ),
+            Compositor::Labwc => Ok(()),
             Compositor::Unsupported => {
                 let desktop =
                     std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unset".to_string());
@@ -103,6 +119,21 @@ fn run(program: &str, args: &[&str]) -> Result<String> {
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Whether `wlr-randr` lists an output by this exact name.
+///
+/// It prints each output name at the start of a line and indents that output's
+/// properties beneath it, so the first token of a line is the name. Comparing
+/// the token rather than a prefix keeps `HEADLESS-1` from matching
+/// `HEADLESS-10`.
+fn labwc_output_exists(name: &str) -> bool {
+    run("wlr-randr", &[])
+        .map(|out| {
+            out.lines()
+                .any(|line| line.split_whitespace().next() == Some(name))
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +298,30 @@ impl VirtualOutput {
     ) -> Result<Self> {
         let compositor = Compositor::detect();
         match compositor {
+            // labwc cannot create an output at runtime — wlroots only builds
+            // headless outputs at backend init, from `WLR_HEADLESS_OUTPUTS`.
+            // So the session attaches to an output that already exists and
+            // leaves it alone afterwards, rather than owning its lifetime.
+            // Nothing here sizes or positions it either: `wlr-randr` could,
+            // but the mode is the tablet's and the user chose this output
+            // deliberately, so silently reshaping their session is worse than
+            // leaving it as configured.
+            Compositor::Labwc => {
+                if !labwc_output_exists(name) {
+                    bail!(
+                        "labwc output {name:?} does not exist.\n\
+                         labwc cannot create one at runtime, so start it with a \
+                         headless output — `WLR_HEADLESS_OUTPUTS=1 labwc` — and \
+                         pass that output's name (`wlr-randr` lists it, usually \
+                         HEADLESS-1) with --output-name.\n\
+                         See docs/COMPATIBILITY.md."
+                    );
+                }
+                return Ok(Self {
+                    compositor,
+                    name: name.to_string(),
+                });
+            }
             Compositor::Hyprland => {
                 let saved_states = hyprland_monitor_state()
                     .context("saving Hyprland monitor state")?;
@@ -321,6 +376,13 @@ impl VirtualOutput {
     pub fn name(&self) -> &str {
         &self.name
     }
+
+    /// Whether the requested mode and position were actually applied. False on
+    /// labwc, where the output is the session's rather than ours and keeps
+    /// whatever geometry it was configured with.
+    pub fn applied_mode(&self) -> bool {
+        self.compositor != Compositor::Labwc
+    }
 }
 
 impl Drop for VirtualOutput {
@@ -328,6 +390,8 @@ impl Drop for VirtualOutput {
         let result = match self.compositor {
             Compositor::Hyprland => run("hyprctl", &["output", "remove", &self.name]),
             Compositor::Sway => run("swaymsg", &["output", &self.name, "unplug"]),
+            // Never created here, so not ours to remove.
+            Compositor::Labwc => return,
             Compositor::Unsupported => return,
         };
         match result {

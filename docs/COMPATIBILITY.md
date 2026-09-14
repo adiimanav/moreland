@@ -3,7 +3,8 @@
 **Verified working on exactly one setup.** Everything else below is an
 assessment of what would be required, not a claim that it works. KDE Plasma has
 since been tested and is **verified blocked** — the reasons are recorded below.
-GNOME and Sway remain untested.
+labwc has a backend contributed and used by its author, untested by the
+maintainer. GNOME and Sway remain untested.
 
 Run [`scripts/moreland-doctor.sh`](../scripts/moreland-doctor.sh) to get this
 answer for your own machine: it checks the compositor, the capture protocol,
@@ -64,6 +65,55 @@ learn what it just made. Mechanical, but it needs writing and testing.
 
 Stub in place; `VirtualOutput::create` returns a clear error rather than
 pretending.
+
+### labwc — works, with the output created by you
+
+Contributed by [@perru](https://github.com/perru) (discussion #5) and adapted
+here. Capture, encode and transport all work unchanged, as the Sway section
+predicts for any wlroots 0.18+ compositor. What differs is the output.
+
+labwc has **no runtime IPC to create one**. wlroots builds headless outputs at
+backend initialisation, from `WLR_HEADLESS_OUTPUTS`, and nothing later can add
+another — there is no `hyprctl output create` equivalent to call. So this
+backend inverts the contract the other two follow: rather than creating an
+output and removing it on drop, it **attaches to one that already exists** and
+leaves it exactly as it found it.
+
+That makes the output a property of your session, not of moreland, and you
+provision it when labwc starts:
+
+```bash
+WLR_HEADLESS_OUTPUTS=1 labwc      # or set it in your session/login script
+wlr-randr                          # lists it, usually as HEADLESS-1
+moreland --output-name HEADLESS-1
+```
+
+`--output-name` is **required** here. The default is `moreland`, a name
+wlroots will never assign — it numbers headless outputs `HEADLESS-N` and
+offers no way to choose. Point it at an output that does not exist and the
+daemon says so at startup rather than failing per device event.
+
+Consequences worth knowing:
+
+- **The output persists.** It was not created by the daemon, so it is not
+  removed on exit; it stays in your layout between sessions. That is the
+  trade for labwc having no create call, not an oversight.
+- **The daemon does not resize or move it.** `wlr-randr` could, but you chose
+  this output deliberately and reshaping a real part of your session behind
+  your back is worse than honouring how you configured it. So `--position`,
+  `--position-y` and the resolution flags do not shape the output on labwc —
+  the stream carries whatever mode the output already has, and the tablet
+  fits that image to its panel. Match them yourself if the aspect ratio is
+  wrong:
+
+  ```bash
+  wlr-randr --output HEADLESS-1 --custom-mode 1920x1200@60 --pos 0,1080
+  ```
+- **`wlr-randr` is a runtime dependency** on this compositor, and doubles as
+  the round-trip that confirms labwc is really the running session.
+
+Detection accepts `XDG_CURRENT_DESKTOP` of either `labwc` or `wlroots`, since
+labwc has reported both across versions.
 
 ### KDE Plasma / KWin — tested, blocked
 

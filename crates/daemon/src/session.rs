@@ -29,6 +29,8 @@ pub struct Config {
     pub position_x: i32,
     pub position_y: i32,
     pub output_name: String,
+    /// Composite the mouse cursor into the streamed frames.
+    pub paint_cursor: bool,
     /// Emit round-trip latency statistics on exit.
     pub stats: bool,
 }
@@ -54,6 +56,7 @@ impl Default for Config {
             position_x: 0,
             position_y: 1080,
             output_name: capture::VIRTUAL_OUTPUT_NAME.to_string(),
+            paint_cursor: false,
             stats: false,
         }
     }
@@ -103,13 +106,21 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         config.position_x,
         config.position_y,
     )?;
-    tracing::info!(
-        "virtual output {} at {}x{}@{}",
-        output.name(),
-        width,
-        height,
-        config.fps
-    );
+    if output.applied_mode() {
+        tracing::info!(
+            "virtual output {} at {}x{}@{}",
+            output.name(),
+            width,
+            height,
+            config.fps
+        );
+    } else {
+        tracing::info!(
+            "using existing output {} with its own mode; encoding at whatever \
+             size it reports",
+            output.name()
+        );
+    }
 
     let forward = adb::Forward::new(
         serial,
@@ -147,6 +158,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
             mode: BufferMode::Dmabuf,
             pool_size: 3,
             allowed_modifiers,
+            paint_cursor: config.paint_cursor,
         },
     )?;
     let encoder = Arc::new(Encoder::new(&EncoderConfig {

@@ -18,6 +18,11 @@ OPTIONS
     --position-y <Y>    y offset of the virtual output [default: 1080]
                         default sits below a primary at 0x0, no taller than
                         1080px; override either axis to fit your layout
+    --output-name <NAME>
+                        name of the virtual output      [default: moreland]
+                        required on labwc, which cannot create one and must
+                        be pointed at an existing headless output
+    --show-cursor       composite the mouse cursor into the stream
 
     --once              stream one session, then exit
     --seconds <N>       stop after N seconds (implies --once and --stats)

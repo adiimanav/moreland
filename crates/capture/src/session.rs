@@ -547,6 +547,7 @@ impl Capture {
     /// it again is what synchronises us with the new generation.
     fn renegotiate(&mut self) -> Result<()> {
         let (old_width, old_height) = (self.width, self.height);
+        let (old_format, old_modifier) = (self.format, self.modifier);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !self.state.session_done {
             if self.state.session_stopped {
@@ -559,14 +560,17 @@ impl Capture {
         }
         self.allocate_pool()?;
 
-        // A format or modifier change is absorbed here — that is the common
-        // case, raised by things like a wallpaper daemon claiming the output.
+        // Reallocating with the *same* format and modifier is absorbed here —
+        // that is the common case, raised by things like a wallpaper daemon
+        // claiming the output.
         //
-        // A *geometry* change cannot be: the encoder and the device's decoder
-        // were both configured for the old dimensions, and neither is told
-        // about this. Silently continuing produces exactly the failure this
-        // was written to fix — frames captured but nothing rendered. Report it
-        // so the caller rebuilds the whole pipeline.
+        // Anything else cannot be. The encoder's caps pin the fourcc and
+        // modifier it was built with, and the encoder and the device's
+        // decoder were both configured for the old dimensions; none of them
+        // is told about this. Silently continuing feeds buffers in one layout
+        // to a consumer reading another — garbage, or `not-negotiated` — or,
+        // for geometry, frames captured but nothing rendered. Report it so the
+        // caller rebuilds the whole pipeline.
         if (self.width, self.height) != (old_width, old_height) {
             self.geometry_changed = true;
             bail!(
@@ -575,6 +579,16 @@ impl Capture {
                 old_height,
                 self.width,
                 self.height
+            );
+        }
+        if (self.format, self.modifier) != (old_format, old_modifier) {
+            bail!(
+                "capture format changed {} modifier {:?} -> {} modifier {:?}; \
+                 pipeline must restart",
+                fourcc_name(old_format),
+                old_modifier.map(|m| format!("0x{m:016x}")),
+                fourcc_name(self.format),
+                self.modifier.map(|m| format!("0x{m:016x}")),
             );
         }
 

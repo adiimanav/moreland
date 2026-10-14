@@ -14,13 +14,15 @@
 //! so pixels never touch the CPU between compositor and encoder.
 
 use anyhow::{bail, Context, Result};
+use capture::dmabuf::Dmabuf;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_allocators::prelude::*;
 use gstreamer_allocators::DmaBufAllocator;
 use gstreamer_app::{AppSink, AppSrc};
 use gstreamer_video::{VideoFormat, VideoFrameFlags, VideoMeta};
-use std::os::fd::BorrowedFd;
+use std::os::fd::{AsFd, OwnedFd};
+use std::os::unix::fs::MetadataExt;
 use std::time::Duration;
 
 /// DRM format modifiers the VA encoder chain can import for `fourcc`, probed
@@ -222,7 +224,6 @@ pub struct Encoder {
     appsrc: AppSrc,
     appsink: AppSink,
     allocator: DmaBufAllocator,
-    frame_size: usize,
     width: u32,
     height: u32,
     /// Format for the per-buffer `VideoMeta`: `DmaDrm` on the zero-copy path,
@@ -378,40 +379,64 @@ impl Encoder {
             appsrc,
             appsink,
             allocator: DmaBufAllocator::new(),
-            // Conservative upper bound; the kernel clamps the mapping to the
-            // real dmabuf size and tiled layouts are never larger than this.
-            frame_size: (config.width as usize) * (config.height as usize) * 4,
             width: config.width,
             height: config.height,
             meta_format,
         })
     }
 
-    /// Submit a captured frame.
+    /// Submit a captured frame, every plane of it.
     ///
     /// `alloc_dmabuf` takes ownership of the fd and closes it with the memory,
-    /// so the fd is duplicated first — otherwise GStreamer would close the
+    /// so each fd is duplicated first — otherwise GStreamer would close the
     /// capture pool's buffer out from under the compositor.
-    pub fn push_frame(
-        &self,
-        fd: BorrowedFd<'_>,
-        offset: u32,
-        stride: u32,
-        pts_ns: u64,
-    ) -> Result<()> {
-        let owned = fd
-            .try_clone_to_owned()
-            .context("duplicating DMA-BUF fd for the encoder")?;
-        let memory = unsafe {
-            self.allocator
-                .alloc_dmabuf(owned, self.frame_size)
-                .context("wrapping DMA-BUF fd as GstMemory")?
-        };
+    ///
+    /// All planes are passed, not just the first: a modifier with auxiliary
+    /// planes (Intel CCS, AMD DCC metadata) is unreadable without them. Planes
+    /// that live in the same DMA-BUF share one `GstMemory`, with their offsets
+    /// relative to it; planes in separate DMA-BUFs each get their own, and
+    /// their offsets are shifted by the memories ahead of them, which is how
+    /// `VideoMeta` addresses a multi-memory buffer.
+    pub fn push_frame(&self, frame: &Dmabuf, pts_ns: u64) -> Result<()> {
+        if frame.planes.is_empty() {
+            bail!("DMA-BUF frame has no planes");
+        }
 
         let mut buffer = gst::Buffer::new();
         {
             let buffer = buffer.get_mut().unwrap();
-            buffer.append_memory(memory);
+            // (st_dev, st_ino) of each DMA-BUF appended, and where it starts.
+            let mut memories: Vec<((u64, u64), usize)> = Vec::new();
+            let mut buffer_size = 0usize;
+            let mut offsets = Vec::with_capacity(frame.planes.len());
+            let mut strides = Vec::with_capacity(frame.planes.len());
+
+            for plane in &frame.planes {
+                let owned = plane
+                    .fd
+                    .as_fd()
+                    .try_clone_to_owned()
+                    .context("duplicating DMA-BUF fd for the encoder")?;
+                let (owned, identity, size) = inspect_dmabuf(owned, plane, frame.height)?;
+                let base = match memories.iter().find(|(id, _)| *id == identity) {
+                    // `owned` is dropped here, closing the duplicate.
+                    Some(&(_, base)) => base,
+                    None => {
+                        let memory = unsafe {
+                            self.allocator
+                                .alloc_dmabuf(owned, size)
+                                .context("wrapping DMA-BUF fd as GstMemory")?
+                        };
+                        buffer.append_memory(memory);
+                        let base = buffer_size;
+                        buffer_size += size;
+                        memories.push((identity, base));
+                        base
+                    }
+                };
+                offsets.push(base + plane.offset as usize);
+                strides.push(plane.stride as i32);
+            }
 
             VideoMeta::add_full(
                 buffer,
@@ -419,8 +444,8 @@ impl Encoder {
                 self.meta_format,
                 self.width,
                 self.height,
-                &[offset as usize],
-                &[stride as i32],
+                &offsets,
+                &strides,
             )
             .context("adding DMA-BUF VideoMeta")?;
 
@@ -487,6 +512,60 @@ impl Drop for Encoder {
     }
 }
 
+/// The fd back, the DMA-BUF's identity (`st_dev`, `st_ino`), and its real size.
+///
+/// The size must be the buffer's own, not one derived from the frame
+/// geometry: stride padding, plane offsets and a tiled layout's row alignment
+/// all make the allocation larger than `width * height * 4`, and a memory
+/// declared smaller than the planes it carries cannot be mapped (the
+/// system-memory fallback) or fully imported. The kernel records a DMA-BUF's
+/// size in its inode. Should an fd report none, fall back to the extent of
+/// this plane, which is the least the memory must cover.
+fn inspect_dmabuf(
+    fd: OwnedFd,
+    plane: &capture::dmabuf::DmabufPlane,
+    height: u32,
+) -> Result<(OwnedFd, (u64, u64), usize)> {
+    let file = std::fs::File::from(fd);
+    let meta = file.metadata().context("inspecting DMA-BUF fd")?;
+    let plane_extent = plane.offset as usize + plane.stride as usize * height as usize;
+    let size = match meta.size() as usize {
+        0 => plane_extent,
+        size => size,
+    };
+    Ok((OwnedFd::from(file), (meta.dev(), meta.ino()), size))
+}
+
 fn fourcc_name(code: u32) -> String {
     String::from_utf8_lossy(&code.to_le_bytes()).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dmabuf_size_comes_from_the_fd_not_the_frame_geometry() {
+        // A linear 1800-px-wide buffer padded to a 256-byte stride is larger
+        // than width * height * 4; the memory must cover all of it.
+        let path = std::env::temp_dir().join(format!("moreland-test-{}", std::process::id()));
+        let file = std::fs::File::create(&path).unwrap();
+        let padded = 7424 * 1200;
+        file.set_len(padded).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let fd = OwnedFd::from(file);
+        let plane = capture::dmabuf::DmabufPlane {
+            fd: fd.try_clone().unwrap(),
+            offset: 0,
+            stride: 7424,
+        };
+        let (_, first, size) = inspect_dmabuf(fd.try_clone().unwrap(), &plane, 1200).unwrap();
+        assert_eq!(size, padded as usize);
+        assert!(size > 1800 * 1200 * 4);
+
+        // A duplicate of the same buffer is recognised as the same memory.
+        let (_, second, _) = inspect_dmabuf(fd, &plane, 1200).unwrap();
+        assert_eq!(first, second);
+    }
 }

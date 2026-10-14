@@ -7,7 +7,6 @@ use capture::session::{BufferMode, Capture, CaptureConfig};
 use encoder::{Encoder, EncoderConfig};
 use std::collections::VecDeque;
 use std::io::Read;
-use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -270,7 +269,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
             let dmabuf = capture
                 .dmabuf(timing.buffer_index)
                 .context("capture produced no DMA-BUF")?;
-            encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, index * frame_duration_ns)?;
+            encoder.push_frame(dmabuf, index * frame_duration_ns)?;
             index += 1;
 
             while let Ok((data, pts, keyframe)) = packet_rx.try_recv() {

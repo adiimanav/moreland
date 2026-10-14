@@ -760,7 +760,7 @@ fn pick_dmabuf_format(
     )
 }
 
-fn fourcc_name(code: u32) -> String {
+pub fn fourcc_name(code: u32) -> String {
     let bytes = code.to_le_bytes();
     if bytes.iter().all(|b| b.is_ascii_graphic()) {
         String::from_utf8_lossy(&bytes).into_owned()

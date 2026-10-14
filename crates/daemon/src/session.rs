@@ -183,6 +183,11 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
             paint_cursor: config.paint_cursor,
         },
     )?;
+    tracing::info!(
+        "capture format {} modifier 0x{:016x}",
+        capture::session::fourcc_name(capture.format),
+        capture.modifier.unwrap_or(0)
+    );
     let encoder = Arc::new(Encoder::new(&EncoderConfig {
         width: capture.width,
         height: capture.height,

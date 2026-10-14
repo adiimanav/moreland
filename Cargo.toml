@@ -20,7 +20,7 @@ wayland-protocols = { version = "0.32", features = ["client", "staging", "unstab
 wayland-scanner = "0.31"
 # Not used directly: the scanner-generated interface tables reference it.
 wayland-backend = "0.3"
-rustix = { version = "1", features = ["fs", "mm", "time"] }
+rustix = { version = "1", features = ["event", "fs", "mm", "time"] }
 memmap2 = "0.9"
 png = "0.18"
 gbm = "0.18"

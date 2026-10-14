@@ -553,10 +553,10 @@ impl Capture {
             if self.state.session_stopped {
                 bail!("capture session stopped during renegotiation");
             }
-            if Instant::now() > deadline {
+            if Instant::now() >= deadline {
                 bail!("timed out waiting for new buffer constraints");
             }
-            self.queue.blocking_dispatch(&mut self.state)?;
+            dispatch_until(&mut self.queue, &mut self.state, deadline)?;
         }
         self.allocate_pool()?;
 
@@ -717,6 +717,54 @@ impl Drop for Capture {
     }
 }
 
+/// Dispatch what arrives before `deadline`, waiting no longer than that.
+///
+/// `blocking_dispatch` waits for events with no bound at all, so a deadline
+/// checked between calls never fires when the compositor goes quiet — the
+/// very case a deadline exists for. This does the same read, but polls the
+/// connection with the time remaining first.
+fn dispatch_until(
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> Result<()> {
+    if queue.dispatch_pending(state)? > 0 {
+        return Ok(());
+    }
+    queue.flush().context("flushing Wayland requests")?;
+    let Some(guard) = queue.prepare_read() else {
+        // Events were queued in the meantime; nothing to wait for.
+        queue.dispatch_pending(state)?;
+        return Ok(());
+    };
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let timeout =
+        rustix::event::Timespec::try_from(remaining).context("converting the dispatch timeout")?;
+    let ready = {
+        let mut fds = [rustix::event::PollFd::from_borrowed_fd(
+            guard.connection_fd(),
+            rustix::event::PollFlags::IN,
+        )];
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(n) => n > 0,
+            Err(rustix::io::Errno::INTR) => false,
+            Err(e) => return Err(e).context("polling the Wayland connection"),
+        }
+    };
+    if ready {
+        match guard.read() {
+            Ok(_) => {}
+            Err(wayland_client::backend::WaylandError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e).context("reading Wayland events"),
+        }
+    }
+    // Not ready: dropping the guard cancels the read.
+    queue.dispatch_pending(state)?;
+    Ok(())
+}
+
 fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
     for wanted in [wl_shm::Format::Xrgb8888, wl_shm::Format::Argb8888] {
         if formats.contains(&wanted) {
@@ -785,4 +833,30 @@ pub fn fourcc_name(code: u32) -> String {
 
 const fn fourcc(code: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_until_returns_at_the_deadline_when_the_compositor_is_silent() {
+        let (client, _silent_compositor) = std::os::unix::net::UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(client).unwrap();
+        let mut queue = conn.new_event_queue::<State>();
+        let mut state = State::default();
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(100);
+        dispatch_until(&mut queue, &mut state, deadline).unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(90),
+            "returned early: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "overshot the deadline: {waited:?}"
+        );
+    }
 }

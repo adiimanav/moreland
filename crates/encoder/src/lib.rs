@@ -98,6 +98,69 @@ fn parse_drm_format(text: &str, wanted: &str) -> Option<u64> {
     Some(parsed)
 }
 
+/// Whether `vapostproc` can import `fourcc:modifier` as DMA_DRM directly.
+///
+/// Some drivers advertise only a handful of formats (Intel's iHD lists
+/// `AR24`/`XB24`/`AB24` with a single tiled modifier and no `XR24`). Offering
+/// anything outside that set fails at runtime with `not-negotiated`.
+fn dmabuf_import_supported(fourcc: u32, modifier: u64) -> bool {
+    let wanted = fourcc_name(fourcc);
+    supported_modifiers_strict(&wanted).contains(&modifier)
+}
+
+fn supported_modifiers_strict(wanted: &str) -> Vec<u64> {
+    let mut modifiers = Vec::new();
+    if let Some(factory) = gst::ElementFactory::find("vapostproc") {
+        for template in factory.static_pad_templates() {
+            if template.direction() != gst::PadDirection::Sink {
+                continue;
+            }
+            let caps = template.caps();
+            for i in 0..caps.size() {
+                let (Some(structure), Some(features)) = (caps.structure(i), caps.features(i))
+                else {
+                    continue;
+                };
+                if !features.contains("memory:DMABuf") {
+                    continue;
+                }
+                if let Ok(value) = structure.value("drm-format") {
+                    collect_modifiers(&value, wanted, &mut modifiers);
+                }
+            }
+        }
+    }
+    modifiers
+}
+
+/// Every `(fourcc, modifier)` pair `vapostproc` imports as DMA-BUF, in the
+/// driver's order. Lets the capture side pick a format that stays zero-copy
+/// instead of assuming XR24.
+pub fn supported_dmabuf_formats() -> Vec<(u32, u64)> {
+    let mut out = Vec::new();
+    if gst::init().is_err() {
+        return out;
+    }
+    for name in ["XR24", "AR24", "XB24", "AB24"] {
+        let code = u32::from_le_bytes(name.as_bytes().try_into().unwrap());
+        for modifier in supported_modifiers_strict(name) {
+            out.push((code, modifier));
+        }
+    }
+    out
+}
+
+/// System-memory video format matching a DRM fourcc, for the fallback path.
+fn raw_format(fourcc: u32) -> Option<&'static str> {
+    match &fourcc.to_le_bytes() {
+        b"XR24" => Some("BGRx"),
+        b"AR24" => Some("BGRA"),
+        b"XB24" => Some("RGBx"),
+        b"AB24" => Some("RGBA"),
+        _ => None,
+    }
+}
+
 pub struct EncoderConfig {
     pub width: u32,
     pub height: u32,
@@ -162,6 +225,9 @@ pub struct Encoder {
     frame_size: usize,
     width: u32,
     height: u32,
+    /// Format for the per-buffer `VideoMeta`: `DmaDrm` on the zero-copy path,
+    /// the matching raw format on the fallback path.
+    meta_format: VideoFormat,
 }
 
 impl Encoder {
@@ -174,19 +240,54 @@ impl Encoder {
             config.modifier
         );
 
-        // DMA_DRM caps carry the tiling in `drm-format`; the encoder chain
-        // stays on the GPU from here to the bitstream.
-        let src_caps = gst::Caps::builder("video/x-raw")
-            .features(["memory:DMABuf"])
-            .field("format", "DMA_DRM")
-            .field("drm-format", &drm_format)
-            .field("width", config.width as i32)
-            .field("height", config.height as i32)
-            .field(
-                "framerate",
-                gst::Fraction::new(config.framerate as i32, 1),
-            )
-            .build();
+        // DMA_DRM caps carry the tiling; the encoder chain stays on the GPU
+        // from here to the bitstream — when the driver can import the format.
+        let zero_copy = dmabuf_import_supported(config.fourcc, config.modifier);
+        let (src_caps, meta_format) = if zero_copy {
+            let caps = gst::Caps::builder("video/x-raw")
+                .features(["memory:DMABuf"])
+                .field("format", "DMA_DRM")
+                .field("drm-format", &drm_format)
+                .field("width", config.width as i32)
+                .field("height", config.height as i32)
+                .field(
+                    "framerate",
+                    gst::Fraction::new(config.framerate as i32, 1),
+                )
+                .build();
+            (caps, VideoFormat::DmaDrm)
+        } else {
+            // The DMA-BUF is still handed over as-is; GStreamer maps it and
+            // vapostproc uploads. Only meaningful for linear buffers, since
+            // a tiled layout cannot be interpreted through a CPU mapping.
+            let format = raw_format(config.fourcc).filter(|_| config.modifier == 0);
+            let Some(format) = format else {
+                bail!(
+                    "vapostproc cannot import {drm_format} as DMA-BUF and no \
+                     system-memory fallback exists for it"
+                );
+            };
+            tracing::warn!(
+                "vapostproc does not accept {drm_format} as DMA-BUF; \
+                 falling back to system-memory input ({format})"
+            );
+            let caps = gst::Caps::builder("video/x-raw")
+                .field("format", format)
+                .field("width", config.width as i32)
+                .field("height", config.height as i32)
+                .field(
+                    "framerate",
+                    gst::Fraction::new(config.framerate as i32, 1),
+                )
+                .build();
+            let video_format = match format {
+                "BGRx" => VideoFormat::Bgrx,
+                "BGRA" => VideoFormat::Bgra,
+                "RGBx" => VideoFormat::Rgbx,
+                _ => VideoFormat::Rgba,
+            };
+            (caps, video_format)
+        };
 
         let pipeline = gst::Pipeline::new();
 
@@ -282,6 +383,7 @@ impl Encoder {
             frame_size: (config.width as usize) * (config.height as usize) * 4,
             width: config.width,
             height: config.height,
+            meta_format,
         })
     }
 
@@ -314,7 +416,7 @@ impl Encoder {
             VideoMeta::add_full(
                 buffer,
                 VideoFrameFlags::empty(),
-                VideoFormat::DmaDrm,
+                self.meta_format,
                 self.width,
                 self.height,
                 &[offset as usize],

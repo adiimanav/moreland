@@ -52,6 +52,11 @@ pub struct CaptureConfig {
     /// compressed surfaces. The result is not an error but a silent fallback to
     /// a CPU copy, which defeats the entire point of the DMA-BUF path.
     pub allowed_modifiers: Vec<u64>,
+    /// Exact `(fourcc, modifier)` pairs the consumer can import zero-copy, in
+    /// preference order. Tried before the XR24/AR24 fallback, so a consumer that
+    /// only imports e.g. a tiled AR24 gets that rather than a linear XR24 it
+    /// would have to read through the CPU. Empty means no preference.
+    pub allowed_formats: Vec<(u32, u64)>,
     /// Ask the compositor to composite the mouse cursor into captured frames.
     pub paint_cursor: bool,
 }
@@ -62,6 +67,7 @@ impl Default for CaptureConfig {
             mode: BufferMode::Dmabuf,
             pool_size: 2,
             allowed_modifiers: Vec::new(),
+            allowed_formats: Vec::new(),
             paint_cursor: false,
         }
     }
@@ -318,6 +324,7 @@ pub struct Capture {
     // buffer constraints mid-session.
     pool_size: usize,
     allowed_modifiers: Vec<u64>,
+    allowed_formats: Vec<(u32, u64)>,
     geometry_changed: bool,
     shm: wl_shm::WlShm,
     dmabuf: Option<ZwpLinuxDmabufV1>,
@@ -415,6 +422,7 @@ impl Capture {
             device_path: None,
             pool_size,
             allowed_modifiers: config.allowed_modifiers.clone(),
+            allowed_formats: config.allowed_formats.clone(),
             geometry_changed: false,
             shm,
             dmabuf: dmabuf_global,
@@ -471,7 +479,11 @@ impl Capture {
                     .as_ref()
                     .context("DMA-BUF mode without a linux-dmabuf global")?;
                 let (fourcc, modifiers) =
-                    pick_dmabuf_format(&caps.dmabuf_formats, &self.allowed_modifiers)?;
+                    pick_dmabuf_format(
+                        &caps.dmabuf_formats,
+                        &self.allowed_modifiers,
+                        &self.allowed_formats,
+                    )?;
                 format = fourcc;
 
                 let dev = caps
@@ -709,9 +721,19 @@ fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
 fn pick_dmabuf_format(
     formats: &[(u32, Vec<u64>)],
     allowed: &[u64],
+    allowed_formats: &[(u32, u64)],
 ) -> Result<(u32, Vec<u64>)> {
     const XR24: u32 = fourcc(b"XR24");
     const AR24: u32 = fourcc(b"AR24");
+
+    for (fourcc, modifier) in allowed_formats {
+        if formats
+            .iter()
+            .any(|(f, offered)| f == fourcc && offered.contains(modifier))
+        {
+            return Ok((*fourcc, vec![*modifier]));
+        }
+    }
 
     for wanted in [XR24, AR24] {
         let Some((fourcc, offered)) = formats.iter().find(|(f, _)| *f == wanted) else {

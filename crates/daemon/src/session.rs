@@ -179,6 +179,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
             mode: BufferMode::Dmabuf,
             pool_size: 3,
             allowed_modifiers,
+            allowed_formats: encoder::supported_dmabuf_formats(),
             paint_cursor: config.paint_cursor,
         },
     )?;

@@ -14,7 +14,27 @@ import java.nio.ByteBuffer
  * [DataInputStream] can be used directly here — no byte-swapping anywhere.
  */
 object Protocol {
+    /** Used only when launched by hand; the daemon passes [SOCKET_EXTRA]. */
     const val SOCKET_NAME = "moreland"
+
+    /** Intent extra carrying this session's socket name from the daemon. */
+    const val SOCKET_EXTRA = "com.moreland.display.SOCKET"
+
+    private val SOCKET_NAME_PATTERN = Regex("[A-Za-z0-9._-]{1,64}")
+
+    /** The socket named in the launch intent, or the default when absent or malformed. */
+    fun socketName(extra: String?): String =
+        extra?.takeIf { SOCKET_NAME_PATTERN.matches(it) } ?: SOCKET_NAME
+
+    /**
+     * `adb forward` connections arrive from adbd, which runs as `shell`, or
+     * as `root` after `adb root`. Any other peer is another app on this
+     * device and must not be able to drive the display.
+     */
+    private const val SHELL_UID = 2000
+    private const val ROOT_UID = 0
+
+    fun isTrustedPeer(uid: Int): Boolean = uid == SHELL_UID || uid == ROOT_UID
 
     private const val MAGIC = 0x4D524C44 // "MRLD"
     const val VERSION = 3

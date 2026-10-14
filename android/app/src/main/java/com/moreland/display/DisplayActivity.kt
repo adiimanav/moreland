@@ -49,7 +49,8 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
         root.addView(status, FrameLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)
 
-        stream = VideoStream(::followStreamShape).also { s ->
+        val socketName = Protocol.socketName(intent.getStringExtra(Protocol.SOCKET_EXTRA))
+        stream = VideoStream(socketName, ::followStreamShape).also { s ->
             s.start()
             input = InputForwarder { s.send(it) }
         }

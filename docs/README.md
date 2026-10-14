@@ -35,7 +35,7 @@ Hyprland  ──hyprctl IPC──▶  virtual output "moreland" @ 1920x1200x60
         vah264enc — VBR, no B-frames, target-usage 3
                                   │  [u32 len][u64 pts][Annex-B]
                                   ▼
-        host 127.0.0.1:27183 ──adb forward──▶ localabstract:moreland
+        host 127.0.0.1:27183 ──adb forward──▶ localabstract:moreland-<random>
                                   │  USB 2.0 bulk
                                   ▼
       Kotlin app: LocalServerSocket → MediaCodec async → SurfaceView

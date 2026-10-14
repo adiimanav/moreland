@@ -31,7 +31,7 @@ Round-trip and bad-magic rejection are unit-tested in `crates/protocol`.
 
 ## Transport
 
-`adb forward tcp:27183 localabstract:moreland` in production — the device app
+`adb forward tcp:27183 localabstract:moreland-<random>` in production — the device app
 listens on an abstract Unix socket, so traffic never touches Android's TCP stack
 or `netd`. The host connects to the forwarded local port.
 

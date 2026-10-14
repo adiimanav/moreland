@@ -514,6 +514,17 @@ fn open_pipeline(output: &mut VirtualOutput, config: &Config) -> Result<Box<dyn 
     Ok(Box::new(ExtPipeline::open(output, config)?))
 }
 
+/// `moreland-` and 128 random bits in hex: unguessable, and safe to pass
+/// through `adb shell` unquoted.
+fn session_socket_name() -> Result<String> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut bytes))
+        .context("reading /dev/urandom for the session socket name")?;
+    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    Ok(format!("moreland-{hex}"))
+}
+
 pub fn app_installed(serial: &str) -> Result<bool> {
     let out = adb::shell(serial, &format!("pm list packages {APP_PACKAGE}"))?;
     Ok(out.contains(APP_PACKAGE))
@@ -573,10 +584,14 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         );
     }
 
+    // A fresh name per session. Abstract socket names are first-come on
+    // Android, so with a fixed one any app on the tablet could bind it while
+    // ours is force-stopped below and receive the desktop stream instead.
+    let socket = session_socket_name()?;
     let forward = adb::Forward::new(
         serial,
         protocol::DEFAULT_PORT,
-        &format!("localabstract:{}", protocol::SOCKET_NAME),
+        &format!("localabstract:{socket}"),
     )?;
     let port = forward.local_port()?;
 
@@ -594,7 +609,13 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let _ = adb::shell(serial, "wm dismiss-keyguard");
     std::thread::sleep(Duration::from_millis(400));
 
-    adb::shell(serial, &format!("am start -n {APP_ACTIVITY}"))
+    adb::shell(
+        serial,
+        &format!(
+            "am start -n {APP_ACTIVITY} --es {} {socket}",
+            protocol::SOCKET_EXTRA
+        ),
+    )
         .context("launching the display app")?;
     std::thread::sleep(Duration::from_millis(2500));
 
@@ -877,5 +898,16 @@ mod tests {
         let frames = trace.frames.lock().unwrap();
         assert!(frames[&66_881].encoded.is_some());
         assert!(frames[&33_105].encoded.is_none());
+    }
+
+    #[test]
+    fn session_socket_names_are_fresh_and_shell_safe() {
+        let a = session_socket_name().unwrap();
+        let b = session_socket_name().unwrap();
+        assert_ne!(a, b);
+        assert_eq!(a.len(), "moreland-".len() + 32);
+        // Must also satisfy the app's own pattern, [A-Za-z0-9._-]{1,64}.
+        assert!(a.len() <= 64);
+        assert!(a.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c)));
     }
 }

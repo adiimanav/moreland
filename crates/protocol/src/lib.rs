@@ -44,8 +44,14 @@ pub const FRAME_HEADER_LEN: usize = 16;
 
 /// Default host-side port for `adb forward`.
 pub const DEFAULT_PORT: u16 = 27183;
-/// Abstract Unix socket the device app listens on.
+/// Abstract Unix socket the device app listens on when launched by hand.
+///
+/// The daemon never uses it: any app on the device can bind an abstract name
+/// first, and a fixed one invites exactly that. Each session picks a fresh,
+/// unguessable name instead and hands it to the app in [`SOCKET_EXTRA`].
 pub const SOCKET_NAME: &str = "moreland";
+/// Intent string extra naming the socket the app should listen on.
+pub const SOCKET_EXTRA: &str = "com.moreland.display.SOCKET";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]

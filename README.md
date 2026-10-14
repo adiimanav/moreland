@@ -337,11 +337,14 @@ on a shared or multi-user system:
 
 - Any local process able to reach `127.0.0.1:27183` can push frames to the
   tablet while the daemon is running.
-- Any app on the tablet can connect to the `localabstract:moreland` socket.
-  Abstract Unix sockets carry no filesystem permissions.
 
-Neither is exploitable for anything beyond drawing on the tablet's screen, and
-neither reaches back into the host. But this is a single-user desktop tool and
+On the tablet, abstract Unix sockets carry no filesystem permissions, so the
+app does its own checks: it accepts connections only from adbd (the `shell` or
+`root` user), and the daemon gives it a fresh random socket name each session,
+so no other app can claim the name first and receive the desktop stream.
+
+The remaining exposure is not exploitable for anything beyond drawing on the
+tablet's screen, and does not reach back into the host. But this is a single-user desktop tool and
 is not hardened for a hostile local user.
 
 **The app requests no Android permissions at all** - not even `INTERNET`. It can

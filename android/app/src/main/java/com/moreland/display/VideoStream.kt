@@ -20,8 +20,9 @@ import java.util.concurrent.TimeUnit
  * Accepts one host connection at a time on an abstract Unix socket, decodes the
  * H.264 stream, and renders to whatever surface is currently attached.
  *
- * The host reaches this socket via `adb forward tcp:27183 localabstract:moreland`,
- * so nothing here touches Android's TCP stack or `netd`.
+ * The host reaches this socket via `adb forward tcp:27183 localabstract:<name>`,
+ * so nothing here touches Android's TCP stack or `netd`. The daemon picks a
+ * fresh name per session, and only adbd's own connections are accepted.
  *
  * **Exactly one instance may exist per process.** The socket name is a
  * process-wide resource: a second instance cannot bind it and will spin on
@@ -30,7 +31,10 @@ import java.util.concurrent.TimeUnit
  * swapped as the view's surface comes and goes, rather than a constructor
  * argument that would tie the stream's lifetime to the surface's.
  */
-class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
+class VideoStream(
+    private val socketName: String,
+    private val onStreamShape: (portrait: Boolean) -> Unit,
+) {
 
     private companion object {
         const val TAG = "Moreland"
@@ -136,11 +140,17 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
     private fun acceptLoop() {
         while (running) {
             try {
-                LocalServerSocket(Protocol.SOCKET_NAME).use { server ->
+                LocalServerSocket(socketName).use { server ->
                     serverSocket = server
-                    Log.i(TAG, "listening on localabstract:${Protocol.SOCKET_NAME}")
+                    Log.i(TAG, "listening on localabstract:$socketName")
                     while (running) {
                         val socket = server.accept()
+                        val uid = runCatching { socket.peerCredentials.uid }.getOrDefault(-1)
+                        if (!Protocol.isTrustedPeer(uid)) {
+                            Log.w(TAG, "refusing connection from uid $uid; only adb may connect")
+                            runCatching { socket.close() }
+                            continue
+                        }
                         Log.i(TAG, "host connected")
                         client = socket
                         runCatching { session(socket) }

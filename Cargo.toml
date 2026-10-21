@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/capture", "crates/encoder", "crates/protocol", "crates/transport", "crates/daemon"]
+members = ["crates/capture", "crates/encoder", "crates/protocol", "crates/transport", "crates/input", "crates/daemon"]
 
 [workspace.package]
 version = "0.1.0"
@@ -33,6 +33,7 @@ capture = { path = "crates/capture" }
 protocol = { path = "crates/protocol" }
 transport = { path = "crates/transport" }
 encoder = { path = "crates/encoder" }
+input = { path = "crates/input" }
 
 [profile.release]
 opt-level = 3

@@ -22,6 +22,14 @@
 //!  13..16  reserved
 //! ```
 //!
+//! Device → host traffic is a sequence of messages, each a type byte followed
+//! by a fixed-length payload:
+//!
+//! ```text
+//! 0x01  ack      8 bytes   pts u64, nanoseconds
+//! 0x02  pointer  28 bytes  see [`PointerEvent`]
+//! ```
+//!
 //! Every multi-byte field is **big-endian**. That is deliberate: Kotlin's
 //! `DataInputStream` reads big-endian natively, so the device side needs no
 //! byte-swapping code at all.
@@ -29,7 +37,7 @@
 use anyhow::{bail, Result};
 
 pub const MAGIC: [u8; 4] = *b"MRLD";
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 pub const STREAM_HEADER_LEN: usize = 16;
 pub const FRAME_HEADER_LEN: usize = 16;
 
@@ -133,6 +141,10 @@ impl FrameHeader {
     }
 }
 
+/// Device → host message types.
+pub const MSG_ACK: u8 = 0x01;
+pub const MSG_POINTER: u8 = 0x02;
+
 /// Device → host acknowledgement, sent when a frame is handed to the display.
 ///
 /// This exists purely to make one-way latency measurable. Host and tablet have
@@ -141,15 +153,178 @@ impl FrameHeader {
 /// RTT to isolate transport plus decode.
 pub const ACK_LEN: usize = 8;
 
-pub fn encode_ack(pts_ns: u64) -> [u8; ACK_LEN] {
-    pts_ns.to_be_bytes()
+pub fn encode_ack(pts_ns: u64) -> [u8; 1 + ACK_LEN] {
+    let mut buf = [0u8; 1 + ACK_LEN];
+    buf[0] = MSG_ACK;
+    buf[1..].copy_from_slice(&pts_ns.to_be_bytes());
+    buf
 }
 
-pub fn decode_ack(buf: &[u8]) -> Result<u64> {
-    if buf.len() < ACK_LEN {
-        bail!("ack too short: {} bytes", buf.len());
+/// What a pointer did, mirroring Android's `MotionEvent` actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Action {
+    Down = 0,
+    Up = 1,
+    Move = 2,
+    /// The gesture was taken away, e.g. by palm rejection. Not a lift.
+    Cancel = 3,
+    /// A pen moving above the glass without touching it.
+    HoverMove = 4,
+    /// The pen left detection range.
+    HoverExit = 5,
+}
+
+impl Action {
+    fn from_u8(value: u8) -> Result<Self> {
+        Ok(match value {
+            0 => Action::Down,
+            1 => Action::Up,
+            2 => Action::Move,
+            3 => Action::Cancel,
+            4 => Action::HoverMove,
+            5 => Action::HoverExit,
+            other => bail!("unknown pointer action {other}"),
+        })
     }
-    Ok(u64::from_be_bytes(buf[..ACK_LEN].try_into().unwrap()))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Tool {
+    Finger = 0,
+    Pen = 1,
+    /// The pen's eraser end.
+    Eraser = 2,
+}
+
+impl Tool {
+    fn from_u8(value: u8) -> Result<Self> {
+        Ok(match value {
+            0 => Tool::Finger,
+            1 => Tool::Pen,
+            2 => Tool::Eraser,
+            other => bail!("unknown pointer tool {other}"),
+        })
+    }
+}
+
+/// Pen button bits in [`PointerEvent::buttons`].
+pub const BUTTON_STYLUS_PRIMARY: u8 = 1 << 0;
+pub const BUTTON_STYLUS_SECONDARY: u8 = 1 << 1;
+
+/// Set on the last pointer of one `MotionEvent`. The host applies a whole
+/// event's pointers together, so multitouch contacts update in one frame.
+pub const POINTER_FLAG_LAST: u8 = 1 << 0;
+
+pub const POINTER_LEN: usize = 28;
+
+/// One pointer of one touch or pen event.
+///
+/// Positions are fractions of the streamed surface, 0.0 to 1.0 from the top
+/// left, so the host needs no knowledge of the tablet's pixel size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PointerEvent {
+    pub action: Action,
+    pub tool: Tool,
+    /// Android's pointer id; stable for the life of one contact.
+    pub pointer_id: u8,
+    pub buttons: u8,
+    pub flags: u8,
+    pub x: f32,
+    pub y: f32,
+    /// 0.0 to 1.0.
+    pub pressure: f32,
+    /// Angle from perpendicular, radians, 0 to pi/2.
+    pub tilt: f32,
+    /// Direction of the tilt, radians, -pi to pi.
+    pub orientation: f32,
+}
+
+impl PointerEvent {
+    pub fn is_last(&self) -> bool {
+        self.flags & POINTER_FLAG_LAST != 0
+    }
+
+    pub fn encode(&self) -> [u8; 1 + POINTER_LEN] {
+        let mut buf = [0u8; 1 + POINTER_LEN];
+        buf[0] = MSG_POINTER;
+        buf[1] = self.action as u8;
+        buf[2] = self.tool as u8;
+        buf[3] = self.pointer_id;
+        buf[4] = self.buttons;
+        buf[5] = self.flags;
+        // 6..9 reserved
+        buf[9..13].copy_from_slice(&self.x.to_be_bytes());
+        buf[13..17].copy_from_slice(&self.y.to_be_bytes());
+        buf[17..21].copy_from_slice(&self.pressure.to_be_bytes());
+        buf[21..25].copy_from_slice(&self.tilt.to_be_bytes());
+        buf[25..29].copy_from_slice(&self.orientation.to_be_bytes());
+        buf
+    }
+
+    fn decode(payload: &[u8]) -> Result<Self> {
+        let f32_at = |at: usize| f32::from_be_bytes(payload[at..at + 4].try_into().unwrap());
+        Ok(Self {
+            action: Action::from_u8(payload[0])?,
+            tool: Tool::from_u8(payload[1])?,
+            pointer_id: payload[2],
+            buttons: payload[3],
+            flags: payload[4],
+            x: f32_at(8),
+            y: f32_at(12),
+            pressure: f32_at(16),
+            tilt: f32_at(20),
+            orientation: f32_at(24),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeviceMessage {
+    Ack { pts_ns: u64 },
+    Pointer(PointerEvent),
+}
+
+/// Reassembles device → host messages from a byte stream that may deliver them
+/// split across reads or several at once.
+#[derive(Default)]
+pub struct MessageParser {
+    buf: Vec<u8>,
+}
+
+impl MessageParser {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feed bytes; returns every message completed by them. An unknown type
+    /// byte is an error because the stream cannot be resynchronised.
+    pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<DeviceMessage>> {
+        self.buf.extend_from_slice(bytes);
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < self.buf.len() {
+            let payload_len = match self.buf[at] {
+                MSG_ACK => ACK_LEN,
+                MSG_POINTER => POINTER_LEN,
+                other => bail!("unknown device message type 0x{other:02x}"),
+            };
+            if self.buf.len() - at < 1 + payload_len {
+                break;
+            }
+            let payload = &self.buf[at + 1..at + 1 + payload_len];
+            out.push(match self.buf[at] {
+                MSG_ACK => DeviceMessage::Ack {
+                    pts_ns: u64::from_be_bytes(payload.try_into().unwrap()),
+                },
+                _ => DeviceMessage::Pointer(PointerEvent::decode(payload)?),
+            });
+            at += 1 + payload_len;
+        }
+        self.buf.drain(..at);
+        Ok(out)
+    }
 }
 
 #[cfg(test)]
@@ -182,6 +357,56 @@ mod tests {
         assert_eq!(decoded.length, 32357);
         assert_eq!(decoded.pts_ns, 1_666_666_600);
         assert!(decoded.keyframe);
+    }
+
+    fn sample_pointer() -> PointerEvent {
+        PointerEvent {
+            action: Action::Move,
+            tool: Tool::Pen,
+            pointer_id: 3,
+            buttons: BUTTON_STYLUS_PRIMARY,
+            flags: POINTER_FLAG_LAST,
+            x: 0.25,
+            y: 0.75,
+            pressure: 0.5,
+            tilt: 0.4,
+            orientation: -1.5,
+        }
+    }
+
+    #[test]
+    fn pointer_round_trips() {
+        let mut parser = MessageParser::new();
+        let out = parser.push(&sample_pointer().encode()).unwrap();
+        assert_eq!(out, vec![DeviceMessage::Pointer(sample_pointer())]);
+    }
+
+    #[test]
+    fn parser_handles_split_and_batched_messages() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&encode_ack(42));
+        bytes.extend_from_slice(&sample_pointer().encode());
+        bytes.extend_from_slice(&encode_ack(43));
+
+        // Feed one byte at a time: the worst case for a TCP-like stream.
+        let mut parser = MessageParser::new();
+        let mut out = Vec::new();
+        for byte in &bytes {
+            out.extend(parser.push(&[*byte]).unwrap());
+        }
+        assert_eq!(
+            out,
+            vec![
+                DeviceMessage::Ack { pts_ns: 42 },
+                DeviceMessage::Pointer(sample_pointer()),
+                DeviceMessage::Ack { pts_ns: 43 },
+            ]
+        );
+    }
+
+    #[test]
+    fn parser_rejects_unknown_type() {
+        assert!(MessageParser::new().push(&[0x7f]).is_err());
     }
 
     #[test]

@@ -5,6 +5,7 @@ package com.moreland.display
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
+import java.nio.ByteBuffer
 
 /**
  * Mirror of `crates/protocol`.
@@ -16,11 +17,33 @@ object Protocol {
     const val SOCKET_NAME = "moreland"
 
     private const val MAGIC = 0x4D524C44 // "MRLD"
-    const val VERSION = 1
+    const val VERSION = 2
 
     const val STREAM_HEADER_LEN = 16
     const val FRAME_HEADER_LEN = 16
     const val ACK_LEN = 8
+    const val POINTER_LEN = 28
+
+    /** Device -> host message types. */
+    const val MSG_ACK = 0x01
+    const val MSG_POINTER = 0x02
+
+    const val ACTION_DOWN = 0
+    const val ACTION_UP = 1
+    const val ACTION_MOVE = 2
+    const val ACTION_CANCEL = 3
+    const val ACTION_HOVER_MOVE = 4
+    const val ACTION_HOVER_EXIT = 5
+
+    const val TOOL_FINGER = 0
+    const val TOOL_PEN = 1
+    const val TOOL_ERASER = 2
+
+    const val BUTTON_STYLUS_PRIMARY = 1
+    const val BUTTON_STYLUS_SECONDARY = 2
+
+    /** Set on the last pointer of one MotionEvent. */
+    const val POINTER_FLAG_LAST = 1
 
     const val FLAG_KEYFRAME = 0x01
 
@@ -86,14 +109,42 @@ object Protocol {
         }
     }
 
-    fun encodeAck(ptsNs: Long): ByteArray = byteArrayOf(
-        (ptsNs ushr 56).toByte(),
-        (ptsNs ushr 48).toByte(),
-        (ptsNs ushr 40).toByte(),
-        (ptsNs ushr 32).toByte(),
-        (ptsNs ushr 24).toByte(),
-        (ptsNs ushr 16).toByte(),
-        (ptsNs ushr 8).toByte(),
-        ptsNs.toByte(),
-    )
+    fun encodeAck(ptsNs: Long): ByteArray {
+        val buf = ByteBuffer.allocate(1 + ACK_LEN) // big-endian by default
+        buf.put(MSG_ACK.toByte())
+        buf.putLong(ptsNs)
+        return buf.array()
+    }
+
+    /**
+     * One pointer of one touch or pen event. Positions are fractions of the
+     * streamed surface, so the host needs no idea of this screen's pixel size.
+     */
+    fun encodePointer(
+        action: Int,
+        tool: Int,
+        pointerId: Int,
+        buttons: Int,
+        flags: Int,
+        x: Float,
+        y: Float,
+        pressure: Float,
+        tilt: Float,
+        orientation: Float,
+    ): ByteArray {
+        val buf = ByteBuffer.allocate(1 + POINTER_LEN)
+        buf.put(MSG_POINTER.toByte())
+        buf.put(action.toByte())
+        buf.put(tool.toByte())
+        buf.put(pointerId.toByte())
+        buf.put(buttons.toByte())
+        buf.put(flags.toByte())
+        buf.put(0).put(0).put(0) // reserved
+        buf.putFloat(x)
+        buf.putFloat(y)
+        buf.putFloat(pressure)
+        buf.putFloat(tilt)
+        buf.putFloat(orientation)
+        return buf.array()
+    }
 }

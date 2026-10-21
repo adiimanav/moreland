@@ -475,6 +475,12 @@ impl VirtualOutput {
         &self.name
     }
 
+    /// The name KWin gives this output, which is what its D-Bus API takes.
+    /// `None` on every other compositor.
+    pub fn kwin_connector(&self) -> Option<String> {
+        (self.compositor == Compositor::Kwin).then(|| format!("Virtual-{}", self.name))
+    }
+
     /// Whether the requested mode and position were actually applied. False on
     /// labwc, where the output is the session's rather than ours and keeps
     /// whatever geometry it was configured with.

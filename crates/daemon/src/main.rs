@@ -12,6 +12,7 @@
 mod display;
 mod output;
 mod session;
+mod touch;
 mod tracker;
 
 use anyhow::{Context, Result};

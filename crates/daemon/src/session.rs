@@ -15,6 +15,7 @@ use transport::{adb, stream_header, Sender};
 
 use crate::display::{self, Layout};
 use crate::output::VirtualOutput;
+use crate::touch;
 
 const APP_PACKAGE: &str = "com.moreland.display";
 const APP_ACTIVITY: &str = "com.moreland.display/.DisplayActivity";
@@ -368,33 +369,67 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let sent_at: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
     let round_trips: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
+    // Touch is a bonus: a session without it still streams the picture.
+    let mut touchscreen = match output.kwin_connector() {
+        Some(connector) => match touch::create_mapped(&connector) {
+            Ok(screen) => Some(screen),
+            Err(e) => {
+                tracing::warn!("touch disabled: {e:#}");
+                None
+            }
+        },
+        None => None,
+    };
+
     let ack_thread = {
         let mut reader = sender.ack_reader()?;
         let sent_at = Arc::clone(&sent_at);
         let round_trips = Arc::clone(&round_trips);
         let running = Arc::clone(&running);
         std::thread::spawn(move || {
-            let mut buf = [0u8; protocol::ACK_LEN];
-            let mut filled = 0usize;
+            let mut parser = protocol::MessageParser::new();
+            let mut buf = [0u8; 512];
             while running.load(Ordering::Relaxed) {
-                match reader.read(&mut buf[filled..]) {
+                let n = match reader.read(&mut buf) {
                     Ok(0) => break,
-                    Ok(n) => {
-                        filled += n;
-                        if filled == protocol::ACK_LEN {
-                            filled = 0;
-                            if let Some(sent) = sent_at.lock().unwrap().pop_front() {
-                                round_trips.lock().unwrap().push(sent.elapsed());
-                            }
-                        }
-                    }
+                    Ok(n) => n,
                     Err(e)
                         if matches!(
                             e.kind(),
                             std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                        ) => {}
+                        ) =>
+                    {
+                        continue
+                    }
                     Err(_) => break,
+                };
+                let messages = match parser.push(&buf[..n]) {
+                    Ok(messages) => messages,
+                    Err(e) => {
+                        tracing::warn!("device sent garbage ({e}); closing the link");
+                        break;
+                    }
+                };
+                for message in messages {
+                    match message {
+                        protocol::DeviceMessage::Ack { .. } => {
+                            if let Some(sent) = sent_at.lock().unwrap().pop_front() {
+                                round_trips.lock().unwrap().push(sent.elapsed());
+                            }
+                        }
+                        protocol::DeviceMessage::Pointer(pointer) => {
+                            if let Some(screen) = touchscreen.as_mut() {
+                                if let Err(e) = screen.handle(&pointer) {
+                                    tracing::warn!("touch input failed: {e:#}");
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+            // A touch still down when the link drops would stay stuck.
+            if let Some(screen) = touchscreen.as_mut() {
+                let _ = screen.release_all();
             }
         })
     };

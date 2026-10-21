@@ -35,6 +35,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         const val TAG = "Moreland"
         const val INPUT_TIMEOUT_MS = 2000L
         const val SURFACE_WAIT_MS = 5000L
+        const val MAX_OUTBOX = 512
     }
 
     @Volatile private var running = false
@@ -47,7 +48,11 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
     private var ackThread: Thread? = null
 
     private val freeInputs = LinkedBlockingQueue<Int>()
-    private val pendingAcks = LinkedBlockingQueue<Long>()
+    /**
+     * Everything bound for the host: acks and input events. One queue and one
+     * writer thread, so the two can never interleave mid-message on the socket.
+     */
+    private val outbox = LinkedBlockingQueue<ByteArray>()
 
     @Volatile var framesDecoded: Long = 0; private set
     @Volatile var lastError: String? = null; private set
@@ -145,7 +150,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
 
         val target = awaitSurface()
         freeInputs.clear()
-        pendingAcks.clear()
+        outbox.clear()
 
         val codec = configureCodec(header, target)
         this.codec = codec
@@ -213,7 +218,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
                 runCatching { codec.releaseOutputBuffer(index, render) }
                 if (render) {
                     framesDecoded++
-                    pendingAcks.offer(info.presentationTimeUs * 1000)
+                    outbox.offer(Protocol.encodeAck(info.presentationTimeUs * 1000))
                 }
             }
 
@@ -234,15 +239,26 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
     }
 
     /**
-     * Acknowledges rendered frames on a dedicated thread so a slow or blocked
+     * Queue a message for the host. Called from the UI thread, so it never
+     * blocks; if the link has stalled the oldest input is dropped rather than
+     * letting stale touches build up behind it.
+     */
+    fun send(message: ByteArray) {
+        if (client == null) return
+        if (outbox.size > MAX_OUTBOX) outbox.poll()
+        outbox.offer(message)
+    }
+
+    /**
+     * Writes acks and input on a dedicated thread so a slow or blocked
      * write can never stall a decoder callback.
      */
     private fun startAckWriter(output: OutputStream) {
         ackThread = Thread({
             try {
                 while (running && !Thread.currentThread().isInterrupted) {
-                    val pts = pendingAcks.poll(500, TimeUnit.MILLISECONDS) ?: continue
-                    output.write(Protocol.encodeAck(pts))
+                    val message = outbox.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                    output.write(message)
                     output.flush()
                 }
             } catch (e: Exception) {

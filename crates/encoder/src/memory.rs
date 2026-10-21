@@ -294,6 +294,12 @@ impl MemoryEncoder {
     }
 }
 
+impl crate::PacketSource for MemoryEncoder {
+    fn pull_packet(&self, timeout: Duration) -> Result<Option<EncodedPacket>> {
+        MemoryEncoder::pull_packet(self, timeout)
+    }
+}
+
 impl Drop for MemoryEncoder {
     fn drop(&mut self) {
         self.stop();

@@ -4,7 +4,7 @@
 
 use anyhow::{bail, Context, Result};
 use capture::session::{BufferMode, Capture, CaptureConfig};
-use encoder::{Encoder, EncoderConfig};
+use encoder::{Encoder, EncoderConfig, PacketSource};
 use std::collections::VecDeque;
 use std::io::Read;
 use std::os::fd::AsFd;
@@ -84,6 +84,188 @@ impl Config {
     }
 }
 
+/// Everything between the virtual output and the encoded packets: how frames
+/// are captured and which encoder they feed. Compositors differ here, not in
+/// the transport.
+trait Pipeline {
+    /// Size of the frames being streamed, as negotiated with the compositor.
+    fn size(&self) -> (u32, u32);
+    /// Where encoded packets come out.
+    fn packets(&self) -> Arc<dyn PacketSource>;
+    /// Capture one frame and submit it for encoding, returning whether one was
+    /// submitted. `index` numbers submitted frames from zero; `frame_ns` is the
+    /// nominal frame interval.
+    fn step(&mut self, output: &mut VirtualOutput, index: u64, frame_ns: u64) -> Result<bool>;
+}
+
+/// `ext-image-copy-capture` into the zero-copy VA-API encoder. Hyprland, labwc.
+struct ExtPipeline {
+    capture: Capture,
+    encoder: Arc<Encoder>,
+}
+
+impl ExtPipeline {
+    fn open(output: &VirtualOutput, config: &Config) -> Result<Self> {
+        // Probe what this machine's encoder can actually import rather than
+        // assuming; the accepted modifier set is GPU-vendor specific.
+        let allowed_modifiers = encoder::supported_modifiers(capture::XR24);
+        tracing::debug!("encoder accepts modifiers {allowed_modifiers:02x?}");
+
+        let capture = Capture::new(
+            output.name(),
+            &CaptureConfig {
+                mode: BufferMode::Dmabuf,
+                pool_size: 3,
+                allowed_modifiers,
+                paint_cursor: config.paint_cursor,
+            },
+        )?;
+        let encoder = Arc::new(Encoder::new(&EncoderConfig {
+            width: capture.width,
+            height: capture.height,
+            framerate: config.fps,
+            bitrate_kbps: config.bitrate_kbps,
+            fourcc: capture.format,
+            modifier: capture.modifier.unwrap_or(0),
+            ..Default::default()
+        })?);
+        Ok(Self { capture, encoder })
+    }
+}
+
+impl Pipeline for ExtPipeline {
+    fn size(&self) -> (u32, u32) {
+        (self.capture.width, self.capture.height)
+    }
+
+    fn packets(&self) -> Arc<dyn PacketSource> {
+        self.encoder.clone()
+    }
+
+    fn step(&mut self, _output: &mut VirtualOutput, index: u64, frame_ns: u64) -> Result<bool> {
+        let timing = self.capture.capture_frame()?;
+        let dmabuf = self
+            .capture
+            .dmabuf(timing.buffer_index)
+            .context("capture produced no DMA-BUF")?;
+        self.encoder.push_frame(
+            dmabuf.planes[0].fd.as_fd(),
+            dmabuf.planes[0].offset,
+            dmabuf.planes[0].stride,
+            index * frame_ns,
+        )?;
+        Ok(true)
+    }
+}
+
+/// KWin's PipeWire stream into a system-memory encoder (NVENC, else x264).
+#[cfg(feature = "plasma")]
+struct PlasmaPipeline {
+    capture: capture::plasma::stream::PwCapture,
+    encoder: Arc<encoder::memory::MemoryEncoder>,
+    size: (u32, u32),
+}
+
+#[cfg(feature = "plasma")]
+impl PlasmaPipeline {
+    /// How long to wait for KWin to announce the stream's format.
+    const FORMAT_TIMEOUT: Duration = Duration::from_secs(5);
+
+    fn open(output: &mut VirtualOutput, config: &Config) -> Result<Self> {
+        use capture::plasma::stream::{Event, PwCapture};
+        use encoder::memory::{Backend, MemoryEncoder, MemoryEncoderConfig};
+
+        let node = output
+            .pipewire_node()
+            .context("the KDE output has no PipeWire node")?;
+        let capture = PwCapture::start(node)?;
+
+        // The encoder needs the real frame size and pixel format, which only
+        // the stream knows, so wait for it to say.
+        let deadline = Instant::now() + Self::FORMAT_TIMEOUT;
+        let format = loop {
+            if !output.poll()? {
+                bail!("KWin removed the virtual output while the stream was starting");
+            }
+            match capture.next_event(Duration::from_millis(50))? {
+                Some(Event::Format(format)) => break format,
+                _ if Instant::now() >= deadline => {
+                    bail!("KWin did not announce a stream format within 5 s")
+                }
+                _ => {}
+            }
+        };
+
+        let backend = match std::env::var("MORELAND_ENCODER") {
+            Ok(name) => name.parse::<Backend>()?,
+            Err(_) => Backend::detect().context(
+                "no H.264 encoder available — install gst-plugins-bad (nvh264enc) or \
+                 gst-plugins-ugly (x264enc)",
+            )?,
+        };
+        tracing::info!("encoding with {}", backend.name());
+
+        let name = format!("{:?}", format.format);
+        let name = name.trim_start_matches("VideoFormat::");
+        let mut encoder_config =
+            MemoryEncoderConfig::new(backend, format.width, format.height, config.fps);
+        encoder_config.bitrate_kbps = config.bitrate_kbps;
+        let encoder = Arc::new(MemoryEncoder::new(&encoder_config, name)?);
+
+        Ok(Self {
+            capture,
+            encoder,
+            size: (format.width, format.height),
+        })
+    }
+}
+
+#[cfg(feature = "plasma")]
+impl Pipeline for PlasmaPipeline {
+    fn size(&self) -> (u32, u32) {
+        self.size
+    }
+
+    fn packets(&self) -> Arc<dyn PacketSource> {
+        self.encoder.clone()
+    }
+
+    fn step(&mut self, output: &mut VirtualOutput, _index: u64, _frame_ns: u64) -> Result<bool> {
+        use capture::plasma::stream::Event;
+
+        if !output.poll()? {
+            bail!("KWin removed the virtual output");
+        }
+        // KWin sends a frame only when the screen changes, so a quiet desktop
+        // legitimately yields nothing; the short timeout just keeps the
+        // shutdown flag and the Wayland connection serviced.
+        match self.capture.next_event(Duration::from_millis(20))? {
+            Some(Event::Frame(frame)) => {
+                self.encoder
+                    .push_frame(&frame.data, frame.stride, frame.pts.as_nanos() as u64)?;
+                return Ok(true);
+            }
+            Some(Event::Format(format)) if (format.width, format.height) != self.size => {
+                bail!(
+                    "stream resized to {}x{} mid-session; restarting",
+                    format.width,
+                    format.height
+                );
+            }
+            _ => {}
+        }
+        Ok(false)
+    }
+}
+
+fn open_pipeline(output: &mut VirtualOutput, config: &Config) -> Result<Box<dyn Pipeline>> {
+    #[cfg(feature = "plasma")]
+    if output.pipewire_node().is_some() {
+        return Ok(Box::new(PlasmaPipeline::open(output, config)?));
+    }
+    Ok(Box::new(ExtPipeline::open(output, config)?))
+}
+
 pub fn app_installed(serial: &str) -> Result<bool> {
     let out = adb::shell(serial, &format!("pm list packages {APP_PACKAGE}"))?;
     Ok(out.contains(APP_PACKAGE))
@@ -122,7 +304,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
 
     let layout = config.layout((width, height));
 
-    let output = VirtualOutput::create(&layout)?;
+    let mut output = VirtualOutput::create(&layout, config.paint_cursor)?;
     if output.applied_mode() {
         let (logical_width, logical_height) = layout.logical_size();
         tracing::info!(
@@ -168,33 +350,13 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         .context("launching the display app")?;
     std::thread::sleep(Duration::from_millis(2500));
 
-    // Probe what this machine's encoder can actually import rather than
-    // assuming; the accepted modifier set is GPU-vendor specific.
-    let allowed_modifiers = encoder::supported_modifiers(capture::XR24);
-    tracing::debug!("encoder accepts modifiers {allowed_modifiers:02x?}");
-
-    let mut capture = Capture::new(
-        output.name(),
-        &CaptureConfig {
-            mode: BufferMode::Dmabuf,
-            pool_size: 3,
-            allowed_modifiers,
-            paint_cursor: config.paint_cursor,
-        },
-    )?;
-    let encoder = Arc::new(Encoder::new(&EncoderConfig {
-        width: capture.width,
-        height: capture.height,
-        framerate: config.fps,
-        bitrate_kbps: config.bitrate_kbps,
-        fourcc: capture.format,
-        modifier: capture.modifier.unwrap_or(0),
-        ..Default::default()
-    })?);
+    let mut pipeline = open_pipeline(&mut output, config)?;
+    let (frame_width, frame_height) = pipeline.size();
+    let packets = pipeline.packets();
 
     let mut sender = Sender::connect(
         port,
-        &stream_header(capture.width, capture.height, config.fps),
+        &stream_header(frame_width, frame_height, config.fps),
     )
     .context("connecting to the app — is it in the foreground on the tablet?")?;
     tracing::info!("streaming to {serial}");
@@ -236,11 +398,10 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
 
     let (packet_tx, packet_rx) = std::sync::mpsc::channel::<(Vec<u8>, u64, bool)>();
     let drain_thread = {
-        let encoder = Arc::clone(&encoder);
         let running = Arc::clone(&running);
         std::thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
-                match encoder.pull_packet(Duration::from_millis(100)) {
+                match packets.pull_packet(Duration::from_millis(100)) {
                     Ok(Some(p)) => {
                         if packet_tx.send((p.data, p.pts_ns, p.keyframe)).is_err() {
                             break;
@@ -260,12 +421,9 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let mut index = 0u64;
     let result = (|| -> Result<()> {
         while !shutdown.load(Ordering::Relaxed) {
-            let timing = capture.capture_frame()?;
-            let dmabuf = capture
-                .dmabuf(timing.buffer_index)
-                .context("capture produced no DMA-BUF")?;
-            encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, index * frame_duration_ns)?;
-            index += 1;
+            if pipeline.step(&mut output, index, frame_duration_ns)? {
+                index += 1;
+            }
 
             while let Ok((data, pts, keyframe)) = packet_rx.try_recv() {
                 sent_at.lock().unwrap().push_back(Instant::now());

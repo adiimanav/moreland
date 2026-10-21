@@ -29,6 +29,10 @@ pub enum Compositor {
     /// runtime IPC to *create* an output, so the session attaches to one the
     /// compositor was started with. See `docs/COMPATIBILITY.md`.
     Labwc,
+    /// KDE Plasma. KWin implements no capture protocol, but its own
+    /// `zkde_screencast_unstable_v1` creates the output and hands back a
+    /// PipeWire node in one call. Needs the `plasma` cargo feature.
+    Kwin,
     Unsupported,
 }
 
@@ -67,6 +71,14 @@ impl Compositor {
         {
             return Compositor::Labwc;
         }
+        // KWin sets XDG_CURRENT_DESKTOP=KDE and has no instance marker of its
+        // own, so the round-trip is `kscreen-doctor`, which is also how the
+        // output is positioned afterwards.
+        if desktop.split(':').any(|d| d.eq_ignore_ascii_case("KDE"))
+            && run("kscreen-doctor", &["-o"]).is_ok()
+        {
+            return Compositor::Kwin;
+        }
         Compositor::Unsupported
     }
 
@@ -75,6 +87,7 @@ impl Compositor {
             Compositor::Hyprland => "Hyprland",
             Compositor::Sway => "Sway",
             Compositor::Labwc => "labwc",
+            Compositor::Kwin => "KDE Plasma",
             Compositor::Unsupported => "unsupported",
         }
     }
@@ -91,6 +104,13 @@ impl Compositor {
                  discover it. See docs/COMPATIBILITY.md."
             ),
             Compositor::Labwc => Ok(()),
+            #[cfg(feature = "plasma")]
+            Compositor::Kwin => Ok(()),
+            #[cfg(not(feature = "plasma"))]
+            Compositor::Kwin => bail!(
+                "this is KDE Plasma, but moreland was built without KDE support.\n\
+                 Rebuild with `cargo build --release --features plasma`."
+            ),
             Compositor::Unsupported => {
                 let desktop =
                     std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unset".to_string());
@@ -268,10 +288,16 @@ fn restore_hyprland_monitor_state(
 pub struct VirtualOutput {
     compositor: Compositor,
     name: String,
+    /// On KDE the output's lifetime is the Wayland connection that created it,
+    /// so this is what keeps the monitor alive.
+    #[cfg(feature = "plasma")]
+    plasma: Option<capture::plasma::PlasmaVirtualOutput>,
 }
 
 impl VirtualOutput {
-    pub fn create(layout: &Layout) -> Result<Self> {
+    // `paint_cursor` only matters to the KDE backend.
+    #[cfg_attr(not(feature = "plasma"), allow(unused_variables))]
+    pub fn create(layout: &Layout, paint_cursor: bool) -> Result<Self> {
         let name = &layout.name;
         let compositor = Compositor::detect();
         match compositor {
@@ -306,10 +332,13 @@ impl VirtualOutput {
                     )
                 })?;
                 run("wlr-randr", &args).with_context(|| format!("rotating labwc output {name}"))?;
-                return Ok(Self {
-                    compositor,
-                    name: name.to_string(),
-                });
+                return Ok(Self::new(compositor, name));
+            }
+            #[cfg(feature = "plasma")]
+            Compositor::Kwin => {
+                let (width, height) = layout.mode;
+                let (x, y) = layout.position;
+                return Self::create_kwin(name, width, height, x, y, paint_cursor);
             }
             Compositor::Hyprland => {
                 let saved_states =
@@ -352,10 +381,74 @@ impl VirtualOutput {
             other => other.ensure_supported()?,
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
-        Ok(Self {
+        Ok(Self::new(compositor, name))
+    }
+
+    fn new(compositor: Compositor, name: &str) -> Self {
+        Self {
             compositor,
-            name: name.clone(),
-        })
+            name: name.to_string(),
+            #[cfg(feature = "plasma")]
+            plasma: None,
+        }
+    }
+
+    /// Create the monitor through `zkde_screencast_unstable_v1` and place it.
+    ///
+    /// KWin ignores a requested refresh rate here — the stream runs at
+    /// whatever the compositor produces — so `refresh` is not passed on.
+    #[cfg(feature = "plasma")]
+    fn create_kwin(
+        name: &str,
+        width: u32,
+        height: u32,
+        x: i32,
+        y: i32,
+        paint_cursor: bool,
+    ) -> Result<Self> {
+        use capture::plasma::{CursorMode, PlasmaVirtualOutput};
+
+        let cursor = if paint_cursor {
+            CursorMode::Embedded
+        } else {
+            CursorMode::Hidden
+        };
+        let plasma = PlasmaVirtualOutput::create(
+            name,
+            "Moreland tablet monitor",
+            i32::try_from(width).context("width out of range")?,
+            i32::try_from(height).context("height out of range")?,
+            1.0,
+            cursor,
+        )?;
+
+        // KWin prefixes virtual outputs with `Virtual-`. A failure to place the
+        // output is not fatal: it still exists and still streams, only at
+        // KWin's default spot beside the primary.
+        let target = format!("output.Virtual-{name}.position.{x},{y}");
+        if let Err(e) = run("kscreen-doctor", &[&target]) {
+            tracing::warn!("could not position the output ({target}): {e:#}");
+        }
+
+        let mut output = Self::new(Compositor::Kwin, name);
+        output.plasma = Some(plasma);
+        Ok(output)
+    }
+
+    /// PipeWire node carrying this output's frames. KDE only.
+    #[cfg(feature = "plasma")]
+    pub fn pipewire_node(&self) -> Option<u32> {
+        self.plasma.as_ref().map(|p| p.node_id())
+    }
+
+    /// Service the compositor connection. Returns false once the compositor
+    /// has removed the output from its side. A no-op everywhere but KDE.
+    #[cfg(feature = "plasma")]
+    pub fn poll(&mut self) -> Result<bool> {
+        match &mut self.plasma {
+            Some(p) => p.poll(),
+            None => Ok(true),
+        }
     }
 
     pub fn name(&self) -> &str {
@@ -377,6 +470,8 @@ impl Drop for VirtualOutput {
             Compositor::Sway => run("swaymsg", &["output", &self.name, "unplug"]),
             // Never created here, so not ours to remove.
             Compositor::Labwc => return,
+            // Dropping `plasma` removes the monitor.
+            Compositor::Kwin => return,
             Compositor::Unsupported => return,
         };
         match result {

@@ -156,6 +156,18 @@ pub struct EncodedPacket {
     pub keyframe: bool,
 }
 
+/// Where encoded access units come from, whichever encoder produced them.
+pub trait PacketSource: Send + Sync {
+    /// Pull the next encoded access unit, waiting up to `timeout`.
+    fn pull_packet(&self, timeout: Duration) -> Result<Option<EncodedPacket>>;
+}
+
+impl PacketSource for Encoder {
+    fn pull_packet(&self, timeout: Duration) -> Result<Option<EncodedPacket>> {
+        Encoder::pull_packet(self, timeout)
+    }
+}
+
 pub struct Encoder {
     pipeline: gst::Pipeline,
     appsrc: AppSrc,

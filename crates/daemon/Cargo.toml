@@ -15,6 +15,11 @@ encoder.workspace = true
 transport.workspace = true
 protocol.workspace = true
 
+[features]
+# KDE Plasma support: PipeWire capture and NVENC/x264 encoding. Off by default
+# so a Hyprland build never needs libpipewire or the KDE protocol XML.
+plasma = ["capture/plasma"]
+
 [[bin]]
 name = "moreland"
 path = "src/main.rs"

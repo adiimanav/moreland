@@ -132,8 +132,8 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
                         client = socket
                         runCatching { session(socket) }
                             .onFailure {
-                                lastError = it.message
-                                Log.w(TAG, "session ended: ${it.message}")
+                                lastError = it.message ?: it.javaClass.simpleName
+                                Log.w(TAG, "session ended: $it", it)
                             }
                         runCatching { socket.close() }
                         client = null
@@ -179,7 +179,15 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         freeInputs.clear()
         outbox.clear()
 
-        val codec = configureCodec(header, target)
+        // The operating-rate hint helps latency but some decoders refuse to
+        // start with it at high size and rate combinations (the Exynos one does
+        // at 2560x1600@90), so fall back to plain realtime priority.
+        val codec = try {
+            configureCodec(header, target, operatingRate = true)
+        } catch (e: MediaCodec.CodecException) {
+            Log.w(TAG, "decoder refused the operating-rate hint ($e); retrying without it")
+            configureCodec(header, target, operatingRate = false)
+        }
         this.codec = codec
         startAckWriter(output)
 
@@ -214,7 +222,11 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         }
     }
 
-    private fun configureCodec(header: Protocol.StreamHeader, target: Surface): MediaCodec {
+    private fun configureCodec(
+        header: Protocol.StreamHeader,
+        target: Surface,
+        operatingRate: Boolean,
+    ): MediaCodec {
         val format = MediaFormat.createVideoFormat(header.mime, header.width, header.height)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -231,7 +243,9 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         // Real-time priority, and an operating rate so the codec sizes its
         // pipeline for this frame rate instead of batching for throughput.
         runCatching { format.setInteger(MediaFormat.KEY_PRIORITY, 0) }
-        runCatching { format.setInteger(MediaFormat.KEY_OPERATING_RATE, header.framerate) }
+        if (operatingRate) {
+            runCatching { format.setInteger(MediaFormat.KEY_OPERATING_RATE, header.framerate) }
+        }
 
         val codec = MediaCodec.createDecoderByType(header.mime)
         codec.setCallback(object : MediaCodec.Callback() {
@@ -266,8 +280,13 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
             }
         })
 
-        codec.configure(format, target, null, 0)
-        codec.start()
+        try {
+            codec.configure(format, target, null, 0)
+            codec.start()
+        } catch (e: Exception) {
+            runCatching { codec.release() }
+            throw e
+        }
         Log.i(TAG, "decoder started: ${codec.name}")
         return codec
     }

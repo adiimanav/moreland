@@ -433,17 +433,7 @@ impl VirtualOutput {
         }
 
         if refresh != 60 {
-            // Reduced blanking keeps the pixel clock low; the resulting rate
-            // lands a hair under the request (90 -> 89.93 Hz), which
-            // `kscreen-doctor ... mode.WxH@R` still matches.
-            let add = format!(
-                "output.Virtual-{name}.addCustomMode.{width}.{height}.{}.reduced",
-                refresh * 1000
-            );
-            let select = format!("output.Virtual-{name}.mode.{width}x{height}@{refresh}");
-            let applied = run("kscreen-doctor", &[&add])
-                .and_then(|_| run("kscreen-doctor", &[&select]));
-            if let Err(e) = applied {
+            if let Err(e) = set_kwin_refresh(&format!("Virtual-{name}"), width, height, refresh) {
                 tracing::warn!(
                     "could not set {refresh} Hz on the output; staying at 60 Hz: {e:#}"
                 );
@@ -505,4 +495,98 @@ impl Drop for VirtualOutput {
             Err(e) => tracing::warn!("failed to remove output {}: {e}", self.name),
         }
     }
+}
+
+/// How close to the requested rate a mode must be to count as a match. The
+/// tablet's panel runs at exactly the nominal rate, so the leftover difference
+/// shows up as one repeated frame every 1 / difference seconds: 0.02 Hz is a
+/// hitch about every 50 s, against every 8 s for the 89.88 Hz KWin tends to
+/// produce first.
+#[cfg(feature = "plasma")]
+const REFRESH_TOLERANCE_HZ: f64 = 0.02;
+
+/// Requested rates to try, in millihertz offsets from the target, when no
+/// existing mode is close enough. KWin derives pixel-clock timings from the
+/// request and rounds to its own steps, so the result is not the request; a
+/// few nearby asks land on different roundings.
+#[cfg(feature = "plasma")]
+const REFRESH_PROBES_MHZ: [i32; 5] = [0, 20, 40, 60, 80];
+
+/// All modes of `connector` at `width`x`height`, as `(id, refresh Hz)`.
+#[cfg(feature = "plasma")]
+fn kwin_modes(connector: &str, width: u32, height: u32) -> Result<Vec<(String, f64)>> {
+    let json = run("kscreen-doctor", &["-j"]).context("reading the KWin output list")?;
+    let doc: serde_json::Value = serde_json::from_str(&json).context("parsing kscreen JSON")?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .context("kscreen JSON has no outputs")?;
+    let output = outputs
+        .iter()
+        .find(|o| o.get("name").and_then(|n| n.as_str()) == Some(connector))
+        .with_context(|| format!("KWin has no output {connector}"))?;
+
+    let mut modes = Vec::new();
+    for mode in output
+        .get("modes")
+        .and_then(|m| m.as_array())
+        .context("output has no modes")?
+    {
+        let size = mode.get("size");
+        let dim = |key: &str| size.and_then(|s| s.get(key)).and_then(|v| v.as_u64());
+        if dim("width") != Some(u64::from(width)) || dim("height") != Some(u64::from(height)) {
+            continue;
+        }
+        let id = match mode.get("id") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => continue,
+        };
+        if let Some(hz) = mode.get("refreshRate").and_then(|r| r.as_f64()) {
+            modes.push((id, hz));
+        }
+    }
+    Ok(modes)
+}
+
+#[cfg(feature = "plasma")]
+fn closest_mode(modes: &[(String, f64)], target: f64) -> Option<&(String, f64)> {
+    modes
+        .iter()
+        .min_by(|a, b| (a.1 - target).abs().total_cmp(&(b.1 - target).abs()))
+}
+
+/// Switch `connector` to the available mode nearest `refresh` Hz, creating
+/// custom modes only if nothing is within [`REFRESH_TOLERANCE_HZ`].
+///
+/// Custom modes are never removed in a session and every new one lengthens
+/// KWin's list, so an existing close-enough mode is reused rather than added.
+#[cfg(feature = "plasma")]
+fn set_kwin_refresh(connector: &str, width: u32, height: u32, refresh: u32) -> Result<()> {
+    let target = f64::from(refresh);
+    let mut modes = kwin_modes(connector, width, height)?;
+
+    for offset in REFRESH_PROBES_MHZ {
+        let within = closest_mode(&modes, target)
+            .is_some_and(|(_, hz)| (hz - target).abs() <= REFRESH_TOLERANCE_HZ);
+        if within {
+            break;
+        }
+        let mhz = refresh * 1000 + offset as u32;
+        let add = format!("output.{connector}.addCustomMode.{width}.{height}.{mhz}.reduced");
+        run("kscreen-doctor", &[&add]).context("adding a custom mode")?;
+        modes = kwin_modes(connector, width, height)?;
+    }
+
+    let (id, hz) = closest_mode(&modes, target).context("no modes at this size")?;
+    run(
+        "kscreen-doctor",
+        &[&format!("output.{connector}.mode.{id}")],
+    )
+    .with_context(|| format!("selecting mode {id} ({hz:.3} Hz)"))?;
+    tracing::info!(
+        "refresh {hz:.3} Hz selected (asked for {refresh}; {:+.3} Hz off)",
+        hz - target
+    );
+    Ok(())
 }

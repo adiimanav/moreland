@@ -1,0 +1,301 @@
+// SPDX-License-Identifier: Apache-2.0
+
+//! H.264 encoding of CPU-memory frames, for machines where the zero-copy
+//! VA-API chain in [`crate::Encoder`] is not an option.
+//!
+//! ```text
+//! appsrc  video/x-raw  BGRx (system memory)
+//!   -> nvh264enc      NVENC; converts colour on the GPU
+//!      | videoconvert -> x264enc     CPU fallback
+//!   -> h264parse      Annex-B, SPS/PPS ahead of every IDR
+//!   -> appsink
+//! ```
+//!
+//! The output is the same byte stream [`crate::Encoder`] produces, so the
+//! transport and the device app cannot tell the two apart.
+
+use anyhow::{bail, Context, Result};
+use gstreamer as gst;
+use gstreamer::prelude::*;
+use gstreamer_app::{AppSink, AppSrc};
+use std::time::Duration;
+
+use crate::EncodedPacket;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// NVIDIA's hardware encoder, through `nvh264enc`.
+    Nvenc,
+    /// libx264 on the CPU.
+    X264,
+}
+
+impl Backend {
+    /// The best backend whose GStreamer element is installed.
+    ///
+    /// Presence of the element is not proof the encoder works — `nvh264enc`
+    /// is registered even when no NVIDIA device is usable — so a failure to
+    /// start the pipeline is reported by [`MemoryEncoder::new`], not here.
+    pub fn detect() -> Option<Self> {
+        gst::init().ok()?;
+        if gst::ElementFactory::find("nvh264enc").is_some() {
+            Some(Self::Nvenc)
+        } else if gst::ElementFactory::find("x264enc").is_some() {
+            Some(Self::X264)
+        } else {
+            None
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Nvenc => "nvenc",
+            Self::X264 => "x264",
+        }
+    }
+}
+
+impl std::str::FromStr for Backend {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "nvenc" => Ok(Self::Nvenc),
+            "x264" => Ok(Self::X264),
+            other => bail!("unknown encoder backend {other:?} (expected nvenc or x264)"),
+        }
+    }
+}
+
+pub struct MemoryEncoderConfig {
+    pub backend: Backend,
+    pub width: u32,
+    pub height: u32,
+    pub framerate: u32,
+    pub bitrate_kbps: u32,
+    /// Distance between keyframes, in frames. See `EncoderConfig`.
+    pub keyframe_interval: u32,
+}
+
+impl MemoryEncoderConfig {
+    pub fn new(backend: Backend, width: u32, height: u32, framerate: u32) -> Self {
+        Self {
+            backend,
+            width,
+            height,
+            framerate,
+            bitrate_kbps: 20_000,
+            keyframe_interval: 600,
+        }
+    }
+}
+
+/// Bytes per pixel of the formats accepted: all four-byte packed RGB.
+const BYTES_PER_PIXEL: usize = 4;
+
+pub struct MemoryEncoder {
+    pipeline: gst::Pipeline,
+    appsrc: AppSrc,
+    appsink: AppSink,
+    width: u32,
+    height: u32,
+}
+
+impl MemoryEncoder {
+    /// Start an encoder for frames of `format` (a GStreamer name such as
+    /// `BGRx`).
+    pub fn new(config: &MemoryEncoderConfig, format: &str) -> Result<Self> {
+        gst::init().context("initialising GStreamer")?;
+
+        let src_caps = gst::Caps::builder("video/x-raw")
+            .field("format", format)
+            .field("width", config.width as i32)
+            .field("height", config.height as i32)
+            .field("framerate", gst::Fraction::new(config.framerate as i32, 1))
+            .build();
+
+        let appsrc = gst::ElementFactory::make("appsrc")
+            .property("caps", &src_caps)
+            .property_from_str("format", "time")
+            .property("is-live", true)
+            // Never queue frames: a stale frame is worse than a dropped one.
+            .property("max-buffers", 1u64)
+            .property_from_str("leaky-type", "downstream")
+            .build()
+            .context("creating appsrc")?;
+
+        let mut elements = vec![appsrc.clone()];
+
+        match config.backend {
+            Backend::Nvenc => {
+                let encoder = gst::ElementFactory::make("nvh264enc")
+                    .property_from_str("rc-mode", "cbr")
+                    .property("bitrate", config.bitrate_kbps)
+                    .property("gop-size", config.keyframe_interval as i32)
+                    .property("bframes", 0u32)
+                    .property("aud", true)
+                    .property("repeat-sequence-header", true)
+                    .property("zerolatency", true)
+                    // p1..p7 with a tune replaces the deprecated named presets.
+                    .property_from_str("preset", "p3")
+                    .property_from_str("tune", "ultra-low-latency")
+                    .build()
+                    .context("creating nvh264enc — is the NVIDIA driver loaded?")?;
+                elements.push(encoder);
+            }
+            Backend::X264 => {
+                let convert = gst::ElementFactory::make("videoconvert")
+                    .build()
+                    .context("creating videoconvert")?;
+                let encoder = gst::ElementFactory::make("x264enc")
+                    .property("bitrate", config.bitrate_kbps)
+                    .property("key-int-max", config.keyframe_interval)
+                    .property("bframes", 0u32)
+                    .property("aud", true)
+                    .property("byte-stream", true)
+                    .property("sliced-threads", true)
+                    .property_from_str("speed-preset", "ultrafast")
+                    .property_from_str("tune", "zerolatency")
+                    .build()
+                    .context("creating x264enc")?;
+                elements.push(convert);
+                elements.push(encoder);
+            }
+        }
+
+        let parser = gst::ElementFactory::make("h264parse")
+            // -1 repeats SPS/PPS before every keyframe, so MediaCodec can
+            // configure itself from the stream without out-of-band csd.
+            .property("config-interval", -1i32)
+            .build()
+            .context("creating h264parse")?;
+        let parsed_caps = gst::Caps::builder("video/x-h264")
+            .field("stream-format", "byte-stream")
+            .field("alignment", "au")
+            .build();
+        let parsed_filter = gst::ElementFactory::make("capsfilter")
+            .property("caps", &parsed_caps)
+            .build()
+            .context("creating h264 capsfilter")?;
+        let appsink = gst::ElementFactory::make("appsink")
+            .property("sync", false)
+            .property("max-buffers", 4u32)
+            .property("drop", false)
+            .build()
+            .context("creating appsink")?;
+
+        elements.extend([parser, parsed_filter, appsink.clone()]);
+
+        let pipeline = gst::Pipeline::new();
+        pipeline.add_many(&elements).context("adding elements")?;
+        gst::Element::link_many(&elements).context("linking pipeline")?;
+
+        let appsrc = appsrc
+            .dynamic_cast::<AppSrc>()
+            .map_err(|_| anyhow::anyhow!("appsrc is not an AppSrc"))?;
+        let appsink = appsink
+            .dynamic_cast::<AppSink>()
+            .map_err(|_| anyhow::anyhow!("appsink is not an AppSink"))?;
+
+        pipeline
+            .set_state(gst::State::Playing)
+            .with_context(|| format!("starting the {} pipeline", config.backend.name()))?;
+
+        Ok(Self {
+            pipeline,
+            appsrc,
+            appsink,
+            width: config.width,
+            height: config.height,
+        })
+    }
+
+    /// Submit one frame. `stride` is the source row pitch in bytes.
+    ///
+    /// Rows are repacked when the pitch is not tight, because the pipeline's
+    /// caps promise a tightly packed buffer and carry no per-buffer layout.
+    pub fn push_frame(&self, data: &[u8], stride: u32, pts_ns: u64) -> Result<()> {
+        let row = self.width as usize * BYTES_PER_PIXEL;
+        let stride = stride as usize;
+        let rows = self.height as usize;
+
+        let packed = if stride == row {
+            data.get(..row * rows)
+                .context("frame is smaller than its dimensions")?
+                .to_vec()
+        } else {
+            if stride < row || data.len() < stride * (rows - 1) + row {
+                bail!(
+                    "frame of {} bytes does not fit {}x{} at stride {stride}",
+                    data.len(),
+                    self.width,
+                    self.height
+                );
+            }
+            let mut out = Vec::with_capacity(row * rows);
+            for y in 0..rows {
+                out.extend_from_slice(&data[y * stride..y * stride + row]);
+            }
+            out
+        };
+
+        let mut buffer = gst::Buffer::from_mut_slice(packed);
+        buffer
+            .get_mut()
+            .context("fresh buffer is not writable")?
+            .set_pts(gst::ClockTime::from_nseconds(pts_ns));
+
+        self.appsrc
+            .push_buffer(buffer)
+            .map_err(|e| anyhow::anyhow!("pushing buffer into appsrc: {e:?}"))?;
+        Ok(())
+    }
+
+    /// Pull the next encoded access unit, waiting up to `timeout`.
+    pub fn pull_packet(&self, timeout: Duration) -> Result<Option<EncodedPacket>> {
+        let Some(sample) = self
+            .appsink
+            .try_pull_sample(gst::ClockTime::from_nseconds(timeout.as_nanos() as u64))
+        else {
+            self.check_bus()?;
+            return Ok(None);
+        };
+
+        let buffer = sample.buffer().context("sample carried no buffer")?;
+        let map = buffer.map_readable().context("mapping encoded buffer")?;
+        Ok(Some(EncodedPacket {
+            data: map.as_slice().to_vec(),
+            pts_ns: buffer.pts().map(|t| t.nseconds()).unwrap_or(0),
+            keyframe: !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT),
+        }))
+    }
+
+    /// Surface any pipeline error rather than letting it stall silently.
+    fn check_bus(&self) -> Result<()> {
+        let Some(bus) = self.pipeline.bus() else {
+            return Ok(());
+        };
+        while let Some(msg) = bus.pop() {
+            if let gst::MessageView::Error(err) = msg.view() {
+                bail!(
+                    "pipeline error from {}: {} ({})",
+                    err.src().map(|s| s.path_string()).unwrap_or_default(),
+                    err.error(),
+                    err.debug().unwrap_or_default()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn stop(&self) {
+        let _ = self.appsrc.end_of_stream();
+        let _ = self.pipeline.set_state(gst::State::Null);
+    }
+}
+
+impl Drop for MemoryEncoder {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}

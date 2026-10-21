@@ -13,6 +13,8 @@
 //! The DMA-BUF fds handed in here are the same ones the compositor wrote into,
 //! so pixels never touch the CPU between compositor and encoder.
 
+pub mod memory;
+
 use anyhow::{bail, Context, Result};
 use gstreamer as gst;
 use gstreamer::prelude::*;

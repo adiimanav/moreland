@@ -35,6 +35,9 @@ OPTIONS
     --show-cursor       composite the mouse cursor into the stream
                         [default: on for KDE, off elsewhere]
     --hide-cursor       leave the cursor out of the stream
+    --no-palm-rejection
+                        let fingers through while the pen is in range
+                        (KDE: touch and pen are forwarded from the tablet)
 
     --once              stream one session, then exit
     --seconds <N>       stop after N seconds (implies --once and --stats)

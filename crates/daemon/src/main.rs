@@ -87,6 +87,7 @@ fn parse_args() -> Args {
                 config.paint_cursor = true;
                 cursor_given = true;
             }
+            "--no-palm-rejection" => config.palm_rejection = false,
             "--hide-cursor" => {
                 config.paint_cursor = false;
                 cursor_given = true;

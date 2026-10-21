@@ -37,6 +37,8 @@ pub struct Config {
     pub output_name: String,
     /// Composite the mouse cursor into the streamed frames.
     pub paint_cursor: bool,
+    /// Ignore fingers while the pen is in range.
+    pub palm_rejection: bool,
     /// Emit round-trip latency statistics on exit.
     pub stats: bool,
 }
@@ -64,6 +66,7 @@ impl Default for Config {
             transform: 0,
             output_name: capture::VIRTUAL_OUTPUT_NAME.to_string(),
             paint_cursor: false,
+            palm_rejection: true,
             stats: false,
         }
     }
@@ -370,11 +373,11 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let round_trips: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
 
     // Touch is a bonus: a session without it still streams the picture.
-    let mut touchscreen = match output.kwin_connector() {
-        Some(connector) => match touch::create_mapped(&connector) {
-            Ok(screen) => Some(screen),
+    let mut remote_input = match output.kwin_connector() {
+        Some(connector) => match touch::create_mapped(&connector, config.palm_rejection) {
+            Ok(remote) => Some(remote),
             Err(e) => {
-                tracing::warn!("touch disabled: {e:#}");
+                tracing::warn!("touch and pen disabled: {e:#}");
                 None
             }
         },
@@ -418,8 +421,8 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
                             }
                         }
                         protocol::DeviceMessage::Pointer(pointer) => {
-                            if let Some(screen) = touchscreen.as_mut() {
-                                if let Err(e) = screen.handle(&pointer) {
+                            if let Some(remote) = remote_input.as_mut() {
+                                if let Err(e) = remote.handle(&pointer) {
                                     tracing::warn!("touch input failed: {e:#}");
                                 }
                             }
@@ -427,9 +430,9 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
                     }
                 }
             }
-            // A touch still down when the link drops would stay stuck.
-            if let Some(screen) = touchscreen.as_mut() {
-                let _ = screen.release_all();
+            // A touch or pen still down when the link drops would stay stuck.
+            if let Some(remote) = remote_input.as_mut() {
+                let _ = remote.release_all();
             }
         })
     };

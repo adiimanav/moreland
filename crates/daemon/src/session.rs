@@ -97,6 +97,10 @@ trait Pipeline {
     fn size(&self) -> (u32, u32);
     /// Where encoded packets come out.
     fn packets(&self) -> Arc<dyn PacketSource>;
+    /// Frames the capture side discarded because encoding fell behind.
+    fn dropped(&self) -> u64 {
+        0
+    }
     /// Capture one frame and submit it for encoding, returning whether one was
     /// submitted. `index` numbers submitted frames from zero; `frame_ns` is the
     /// nominal frame interval.
@@ -231,6 +235,10 @@ impl PlasmaPipeline {
 impl Pipeline for PlasmaPipeline {
     fn size(&self) -> (u32, u32) {
         self.size
+    }
+
+    fn dropped(&self) -> u64 {
+        self.capture.dropped()
     }
 
     fn packets(&self) -> Arc<dyn PacketSource> {
@@ -479,6 +487,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         Ok(())
     })();
 
+    let dropped = pipeline.dropped();
     running.store(false, Ordering::Relaxed);
     let (sender, sent) = drain_thread
         .join()
@@ -488,7 +497,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let result = sent.and(result);
 
     if config.stats {
-        report(&round_trips.lock().unwrap(), index, sender.bytes_sent());
+        report(&round_trips.lock().unwrap(), index, sender.bytes_sent(), dropped);
     }
 
     // Leaving the app in the foreground with a dead socket is confusing; send
@@ -500,10 +509,13 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     result
 }
 
-fn report(trips: &[Duration], frames: u64, bytes: u64) {
+fn report(trips: &[Duration], frames: u64, bytes: u64, dropped: u64) {
     println!("\n  frames captured   {frames}");
     println!("  bytes sent        {:.1} MB", bytes as f64 / 1e6);
     println!("  acks received     {}", trips.len());
+    if dropped > 0 {
+        println!("  frames dropped    {dropped}  (encoder could not keep up)");
+    }
     if trips.is_empty() {
         println!("\n  no acknowledgements — check `adb logcat -s Moreland`");
         return;

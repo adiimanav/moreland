@@ -19,7 +19,9 @@ use anyhow::{anyhow, Context, Result};
 use pipewire as pw;
 use pw::{properties::properties, spa};
 use spa::pod::Pod;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -62,12 +64,13 @@ struct Shared {
     events: SyncSender<Event>,
     started: Instant,
     /// Frames dropped because the consumer was behind.
-    dropped: u64,
+    dropped: Arc<AtomicU64>,
 }
 
 /// A running capture of one PipeWire node.
 pub struct PwCapture {
     events: Receiver<Event>,
+    dropped: Arc<AtomicU64>,
     quit: Option<pw::channel::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -76,15 +79,17 @@ impl PwCapture {
     /// Connect to `node_id` and start delivering frames.
     pub fn start(node_id: u32) -> Result<Self> {
         let (tx, events) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
         let (quit, quit_rx) = pw::channel::channel::<()>();
         // The loop reports whether it could connect at all before the caller
         // gets a handle, so a bad node id fails here rather than as silence.
         let (ready_tx, ready_rx) = sync_channel::<Result<(), String>>(1);
 
+        let dropped_for_thread = Arc::clone(&dropped);
         let thread = std::thread::Builder::new()
             .name("pipewire".into())
             .spawn(move || {
-                if let Err(e) = run(node_id, tx.clone(), quit_rx, &ready_tx) {
+                if let Err(e) = run(node_id, tx.clone(), quit_rx, &ready_tx, dropped_for_thread) {
                     let msg = format!("{e:#}");
                     // `ready_tx` is only read once; a late error goes on the
                     // event channel instead.
@@ -98,6 +103,7 @@ impl PwCapture {
         match ready_rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => Ok(Self {
                 events,
+                dropped,
                 quit: Some(quit),
                 thread: Some(thread),
             }),
@@ -106,6 +112,11 @@ impl PwCapture {
                 "timed out connecting to PipeWire node {node_id}; is pipewire running?"
             )),
         }
+    }
+
+    /// Frames discarded because the consumer had not taken the previous ones.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
     }
 
     /// Wait up to `timeout` for the next event.
@@ -135,6 +146,7 @@ fn run(
     events: SyncSender<Event>,
     quit_rx: pw::channel::Receiver<()>,
     ready: &SyncSender<Result<(), String>>,
+    dropped: Arc<AtomicU64>,
 ) -> Result<()> {
     pw::init();
 
@@ -164,7 +176,7 @@ fn run(
         format: None,
         events,
         started: Instant::now(),
-        dropped: 0,
+        dropped,
     };
 
     let _listener = stream
@@ -237,7 +249,9 @@ fn run(
             };
             match shared.events.try_send(Event::Frame(frame)) {
                 Ok(()) => {}
-                Err(TrySendError::Full(_)) => shared.dropped += 1,
+                Err(TrySendError::Full(_)) => {
+                    shared.dropped.fetch_add(1, Ordering::Relaxed);
+                }
                 Err(TrySendError::Disconnected(_)) => {}
             }
         })

@@ -54,6 +54,9 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
      */
     private val outbox = LinkedBlockingQueue<ByteArray>()
 
+    /** Frame rate of the current stream, or 0 before one starts. */
+    @Volatile private var streamFps = 0
+
     @Volatile var framesDecoded: Long = 0; private set
     @Volatile var lastError: String? = null; private set
 
@@ -72,11 +75,33 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
      */
     fun setSurface(surface: Surface?) {
         this.surface = surface
+        if (surface != null) requestFrameRate(surface, streamFps)
         val codec = this.codec ?: return
         if (surface != null && surface.isValid) {
             runCatching { codec.setOutputSurface(surface) }
                 .onFailure { Log.w(TAG, "setOutputSurface failed: ${it.message}") }
         }
+    }
+
+    /**
+     * Tell the system this surface shows a fixed-rate source, so it can run the
+     * panel at a matching refresh. A 60 fps stream on a 90 Hz panel holds
+     * frames for an uneven one or two refreshes each, which looks like
+     * micro-stutter; at 60 Hz every frame lasts exactly one refresh.
+     */
+    private fun requestFrameRate(surface: Surface, fps: Int) {
+        if (fps <= 0 || !surface.isValid || Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                surface.setFrameRate(
+                    fps.toFloat(),
+                    Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE,
+                    Surface.CHANGE_FRAME_RATE_ALWAYS,
+                )
+            } else {
+                surface.setFrameRate(fps.toFloat(), Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE)
+            }
+        }.onFailure { Log.w(TAG, "setFrameRate failed: ${it.message}") }
     }
 
     fun start() {
@@ -149,6 +174,8 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         onStreamShape(header.height > header.width)
 
         val target = awaitSurface()
+        streamFps = header.framerate
+        requestFrameRate(target, streamFps)
         freeInputs.clear()
         outbox.clear()
 

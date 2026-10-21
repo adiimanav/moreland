@@ -397,7 +397,9 @@ Especially wanted:
   exists; GNOME needs the portal variant
 - **A zero-copy DMA-BUF path on KDE**, so Plasma can use VA-API without a CPU copy
 - **Intel and NVIDIA reports**, positive or negative
-- **Touch input** via `zwlr_virtual_pointer_v1`
+- **Touch and pen on other compositors.** KDE has both (see
+  [`docs/06-plasma-backend.md`](docs/06-plasma-backend.md)); Hyprland and wlroots
+  need a way to map the virtual devices to the output
 
 Please include your compositor, GPU, driver version, and tablet model. A
 documented failure is more useful than silence.

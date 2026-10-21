@@ -295,3 +295,47 @@ over 15 s.
   (p95 43 ms, max 93 ms on the run above).
 - The output is positioned with `kscreen-doctor output.Virtual-<name>.position`;
   if that fails the output still streams, at KWin's default position.
+
+## Touch and pen
+
+The tablet's touchscreen and S Pen are forwarded back to the host, so the
+second monitor can be drawn on, not just looked at. KDE only for now.
+
+```
+Tab S9 FE+ MotionEvent --(protocol v2, device->host)--> daemon
+   finger -> uinput multitouch screen   "Moreland Touchscreen"
+   S Pen  -> uinput screen tablet       "Moreland Pen"
+   both pinned to the virtual output over KWin's D-Bus API (outputName)
+```
+
+- **Wire format.** Device-to-host traffic is now typed messages (ack, pointer),
+  so protocol version 2. A pointer carries position as a fraction of the
+  surface, pressure, tilt, buttons and a "last in event" flag so a multitouch
+  frame is applied atomically. The host-side parser tolerates split and batched
+  reads and is tested one byte at a time.
+- **Pen.** Proximity (`BTN_TOOL_PEN`/`BTN_TOOL_RUBBER`), pressure, hover, and the
+  barrel buttons (`BTN_STYLUS`/`BTN_STYLUS2`) reach applications as a real
+  tablet tool. Tilt is carried but a Tab S9 FE+ S Pen reports none. Krita binds
+  the barrel button to panning by default; that is Krita's setting.
+- **Palm rejection** is on the host: a finger that lands while the pen is in
+  range is ignored, and fingers already down are cancelled when the tip touches.
+  `--no-palm-rejection` turns it off. It also blocks pinch gestures while the
+  pen hovers, which some people will not want.
+- **Needs** `/dev/uinput` to be writable by your user (it is on Fedora with
+  the default ACLs). If the devices cannot be created or mapped the session
+  logs `touch and pen disabled` and still streams the picture.
+
+## Latency notes
+
+Two things mattered more than any encoder setting:
+
+- Encoded packets used to be sent only between capture-loop iterations, and on
+  a quiet desktop the loop waits for the next frame, so a finished packet could
+  sit for up to a frame interval. The encoder thread now sends directly.
+- On the tablet, Android batches touch input to the display refresh unless the
+  view asks for unbuffered dispatch, and the app set only Qualcomm's decoder
+  low-latency key. Exynos has its own (`vendor.rtc-ext-dec-low-latency.enable`).
+
+Tuning knobs that remain: `MORELAND_NVENC_PRESET=p1..p7` (default `p5`),
+`--bitrate`, `--fps` (default 60 on KDE; 90 micro-stuttered through the CPU
+copy), and resolution.

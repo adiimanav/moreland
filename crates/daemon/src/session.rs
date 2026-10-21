@@ -437,46 +437,55 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         })
     };
 
-    let (packet_tx, packet_rx) = std::sync::mpsc::channel::<(Vec<u8>, u64, bool)>();
+    // The thread that pulls packets out of the encoder also sends them. They
+    // used to be handed back to the capture loop first, which only looked for
+    // them between frames — and waiting for the next frame can take a whole
+    // frame interval or more on a quiet desktop, so a finished packet sat idle
+    // for that long. Sending from here puts it on the wire the instant the
+    // encoder produces it.
+    let link_down = Arc::new(AtomicBool::new(false));
     let drain_thread = {
         let running = Arc::clone(&running);
-        std::thread::spawn(move || {
-            while running.load(Ordering::Relaxed) {
-                match packets.pull_packet(Duration::from_millis(100)) {
-                    Ok(Some(p)) => {
-                        if packet_tx.send((p.data, p.pts_ns, p.keyframe)).is_err() {
-                            break;
+        let link_down = Arc::clone(&link_down);
+        let sent_at = Arc::clone(&sent_at);
+        std::thread::spawn(move || -> (Sender, Result<()>) {
+            let outcome = (|| -> Result<()> {
+                while running.load(Ordering::Relaxed) {
+                    match packets.pull_packet(Duration::from_millis(100))? {
+                        Some(p) => {
+                            sent_at.lock().unwrap().push_back(Instant::now());
+                            sender.send_frame(&p.data, p.pts_ns, p.keyframe)?;
                         }
-                    }
-                    Ok(None) => continue,
-                    Err(e) => {
-                        tracing::error!("encoder: {e}");
-                        break;
+                        None => continue,
                     }
                 }
+                Ok(())
+            })();
+            if outcome.is_err() {
+                link_down.store(true, Ordering::Relaxed);
             }
+            (sender, outcome)
         })
     };
 
     let frame_duration_ns = 1_000_000_000u64 / u64::from(config.fps);
     let mut index = 0u64;
     let result = (|| -> Result<()> {
-        while !shutdown.load(Ordering::Relaxed) {
+        while !shutdown.load(Ordering::Relaxed) && !link_down.load(Ordering::Relaxed) {
             if pipeline.step(&mut output, index, frame_duration_ns)? {
                 index += 1;
-            }
-
-            while let Ok((data, pts, keyframe)) = packet_rx.try_recv() {
-                sent_at.lock().unwrap().push_back(Instant::now());
-                sender.send_frame(&data, pts, keyframe)?;
             }
         }
         Ok(())
     })();
 
     running.store(false, Ordering::Relaxed);
-    let _ = drain_thread.join();
+    let (sender, sent) = drain_thread
+        .join()
+        .map_err(|_| anyhow::anyhow!("the packet thread panicked"))?;
     let _ = ack_thread.join();
+    // A broken link is the more useful error: it is why the loop stopped.
+    let result = sent.and(result);
 
     if config.stats {
         report(&round_trips.lock().unwrap(), index, sender.bytes_sent());

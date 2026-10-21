@@ -198,6 +198,13 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         // extension is the fallback; unknown vendor keys are ignored rather
         // than rejected, so setting it costs nothing.
         runCatching { format.setInteger("vendor.qti-ext-dec-low-latency.enable", 1) }
+        // Samsung's Exynos decoders (c2.exynos.*) have their own spelling of the
+        // same switch, and ignore the Qualcomm one.
+        runCatching { format.setInteger("vendor.rtc-ext-dec-low-latency.enable", 1) }
+        // Real-time priority, and an operating rate so the codec sizes its
+        // pipeline for this frame rate instead of batching for throughput.
+        runCatching { format.setInteger(MediaFormat.KEY_PRIORITY, 0) }
+        runCatching { format.setInteger(MediaFormat.KEY_OPERATING_RATE, header.framerate) }
 
         val codec = MediaCodec.createDecoderByType(header.mime)
         codec.setCallback(object : MediaCodec.Callback() {

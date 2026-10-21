@@ -77,6 +77,12 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
     // Touch and pen go to the host whatever view they land on, so the status
     // text or a flashing system bar can never swallow them.
     override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // By default Android batches touch samples to the display's refresh, so
+        // an event can wait up to a frame before this code even sees it. Ask
+        // for each sample as it arrives; this lasts until the finger lifts.
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            surfaceView.requestUnbufferedDispatch(ev)
+        }
         input?.forward(ev, surfaceView.width, surfaceView.height)
         return super.dispatchTouchEvent(ev)
     }

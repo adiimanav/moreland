@@ -11,7 +11,8 @@ OPTIONS
     --native            stream the tablet's full panel resolution
     --width <PX>        pin width  (requires --height)
     --height <PX>       pin height (requires --width)
-    --fps <N>           virtual output refresh rate    [default: 90]
+    --fps <N>           virtual output refresh rate    [default: 90;
+                        60 on KDE, where 90 can stutter]
                         120 measures better still; 144 saturates
     --bitrate <KBPS>    H.264 target bitrate           [default: 20000;
                         60000 on KDE, where encoding is NVENC/x264]

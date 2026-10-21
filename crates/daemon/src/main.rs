@@ -22,6 +22,8 @@ use tracker::DeviceTracker;
 
 struct Args {
     config: session::Config,
+    /// Whether `--fps` was passed, so a compositor default can apply otherwise.
+    fps_given: bool,
     once: bool,
     seconds: Option<u64>,
 }
@@ -29,6 +31,7 @@ struct Args {
 fn parse_args() -> Args {
     let mut config = session::Config::default();
     let mut once = false;
+    let mut fps_given = false;
     let mut seconds = None;
     let mut print_rule = false;
     let (mut width, mut height) = (None, None);
@@ -43,7 +46,10 @@ fn parse_args() -> Args {
             "--height" => height = Some(next_u32(1200)),
             "--max-width" => config.max_width = next_u32(1920),
             "--native" => config.max_width = u32::MAX,
-            "--fps" => config.fps = next_u32(60),
+            "--fps" => {
+                config.fps = next_u32(60);
+                fps_given = true;
+            }
             "--bitrate" => config.bitrate_kbps = Some(next_u32(20_000)),
             "--position" => {
                 config.position_x = it
@@ -113,6 +119,7 @@ fn parse_args() -> Args {
 
     Args {
         config,
+        fps_given,
         once,
         seconds,
     }
@@ -126,7 +133,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let args = parse_args();
+    let mut args = parse_args();
 
     // Refuse to start rather than discovering this once per device event. The
     // compositor cannot change under a running daemon — the unit is
@@ -136,6 +143,13 @@ fn main() -> Result<()> {
     let compositor = output::Compositor::detect();
     compositor.ensure_supported()?;
     tracing::info!("compositor: {}", compositor.name());
+
+    // The KDE path copies every frame through system memory, and 90 Hz showed
+    // micro-stutter on a GTX 1650 where 60 Hz was smooth. Default to 60 there;
+    // an explicit --fps is always honoured.
+    if compositor == output::Compositor::Kwin && !args.fps_given {
+        args.config.fps = 60;
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
 

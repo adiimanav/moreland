@@ -29,6 +29,8 @@
 //! The output's lifetime is the Wayland connection's. Dropping this struct, or
 //! losing the connection, removes the monitor.
 
+pub mod stream;
+
 use anyhow::{bail, Context, Result};
 use std::time::{Duration, Instant};
 use wayland_client::globals::{registry_queue_init, GlobalList, GlobalListContents};

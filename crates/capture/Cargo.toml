@@ -18,16 +18,22 @@ gbm.workspace = true
 drm-fourcc.workspace = true
 wayland-scanner = { workspace = true, optional = true }
 wayland-backend = { workspace = true, optional = true }
+pipewire = { version = "0.10", optional = true }
 
 [features]
 # KDE Plasma capture backend. Off by default: it needs the
 # plasma-wayland-protocols XML at build time, and a Hyprland build must not
 # acquire a KDE dependency it never uses.
-plasma = ["dep:wayland-scanner", "dep:wayland-backend"]
+plasma = ["dep:wayland-scanner", "dep:wayland-backend", "dep:pipewire"]
 
 [[bin]]
 name = "capture-probe"
 path = "src/bin/capture_probe.rs"
+
+[[bin]]
+name = "pw-probe"
+path = "src/bin/pw_probe.rs"
+required-features = ["plasma"]
 
 [[bin]]
 name = "plasma-probe"

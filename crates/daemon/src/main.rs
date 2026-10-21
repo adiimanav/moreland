@@ -55,18 +55,19 @@ fn parse_args() -> Args {
                 fps_given = true;
             }
             "--bitrate" => config.bitrate_kbps = Some(next_u32(20_000)),
-            "--position" => {
-                config.position_x = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(config.position_x);
-            }
-            "--position-y" => {
-                config.position_y = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(config.position_y);
-            }
+            "--position" => config.position_x = it.next().and_then(|v| v.parse().ok()),
+            "--position-y" => config.position_y = it.next().and_then(|v| v.parse().ok()),
+            "--side" => match it.next().as_deref().map(str::parse::<output::Side>) {
+                Some(Ok(side)) => config.side = Some(side),
+                Some(Err(e)) => {
+                    eprintln!("--side: {e}");
+                    std::process::exit(2);
+                }
+                None => {
+                    eprintln!("--side needs a value: right, left, above or below");
+                    std::process::exit(2);
+                }
+            },
             "--output-name" => {
                 if let Some(name) = it.next() {
                     config.output_name = name;
@@ -117,6 +118,10 @@ fn parse_args() -> Args {
         }
         (None, None) => None,
     };
+
+    if config.side.is_some() && (config.position_x.is_some() || config.position_y.is_some()) {
+        eprintln!("--side is ignored because --position / --position-y was also given");
+    }
 
     if print_rule {
         match print_layout(&config) {

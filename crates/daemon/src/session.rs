@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use transport::{adb, stream_header, Sender};
 
 use crate::display::{self, Layout};
-use crate::output::VirtualOutput;
+use crate::output::{Placement, Side, VirtualOutput, FALLBACK_POSITION};
 use crate::touch;
 
 const APP_PACKAGE: &str = "com.moreland.display";
@@ -29,8 +29,12 @@ pub struct Config {
     pub fps: u32,
     /// `None` lets each pipeline pick its own default.
     pub bitrate_kbps: Option<u32>,
-    pub position_x: i32,
-    pub position_y: i32,
+    /// Explicit corner of the virtual output. When neither is set the output
+    /// goes against `side` of the main screen instead.
+    pub position_x: Option<i32>,
+    pub position_y: Option<i32>,
+    /// Edge of the main screen to sit against; right when unset.
+    pub side: Option<Side>,
     /// Output rotation, 1 = 90 degrees clockwise. Must be repeated in the
     /// monitor rule the daemon issues, or Hyprland resets it to 0.
     pub transform: i32,
@@ -56,13 +60,14 @@ impl Default for Config {
             // saturates: 163 of 1764 frames unacked and a 208 ms stall.
             fps: 90,
             bitrate_kbps: None,
-            // Below a primary at 0x0, starting at y = 1080. This assumes the
-            // primary is no taller than 1080px — on a taller display the
-            // virtual output would overlap it rather than sit below. Override
-            // with `--position`/`--position-y` if that does not hold for your
-            // layout.
-            position_x: 0,
-            position_y: 1080,
+            // No explicit corner: KDE sits the output against `side` of the
+            // main screen; elsewhere it goes below a primary at 0x0, at
+            // y = 1080 (FALLBACK_POSITION). That assumes the primary is no
+            // taller than 1080px. Override with `--position`/`--position-y`
+            // if that does not hold for your layout.
+            position_x: None,
+            position_y: None,
+            side: None,
             transform: 0,
             output_name: capture::VIRTUAL_OUTPUT_NAME.to_string(),
             paint_cursor: false,
@@ -82,9 +87,27 @@ impl Config {
             name: self.output_name.clone(),
             mode,
             refresh: self.fps,
-            position: (self.position_x, self.position_y),
+            position: match self.placement() {
+                Placement::Coords(x, y) => (x, y),
+                // Only KDE reads the live layout to honour a side.
+                Placement::Side(_) => FALLBACK_POSITION,
+            },
             scale: 1.0,
             transform: self.transform,
+        }
+    }
+
+    /// Where the output goes. Explicit coordinates win; otherwise it sits
+    /// against an edge of the main screen, on the right unless told
+    /// differently. A missing axis of a partial pair keeps the legacy
+    /// default (0 across, 1080 down).
+    pub fn placement(&self) -> Placement {
+        match (self.position_x, self.position_y) {
+            (None, None) => Placement::Side(self.side.unwrap_or(Side::Right)),
+            (x, y) => Placement::Coords(
+                x.unwrap_or(FALLBACK_POSITION.0),
+                y.unwrap_or(FALLBACK_POSITION.1),
+            ),
         }
     }
 }
@@ -428,7 +451,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
 
     let layout = config.layout((width, height));
 
-    let mut output = VirtualOutput::create(&layout, config.paint_cursor)?;
+    let mut output = VirtualOutput::create(&layout, config.placement(), config.paint_cursor)?;
     if output.applied_mode() {
         let (logical_width, logical_height) = layout.logical_size();
         tracing::info!(

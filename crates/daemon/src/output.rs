@@ -36,6 +36,60 @@ pub enum Compositor {
     Unsupported,
 }
 
+/// Which edge of the main screen the tablet's monitor sits against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Right,
+    Left,
+    Above,
+    Below,
+}
+
+impl std::str::FromStr for Side {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "right" => Ok(Side::Right),
+            "left" => Ok(Side::Left),
+            "above" | "top" | "up" => Ok(Side::Above),
+            "below" | "bottom" | "down" => Ok(Side::Below),
+            other => Err(format!(
+                "unknown side {other:?}; expected right, left, above or below"
+            )),
+        }
+    }
+}
+
+/// Where the virtual monitor goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Exact top-left corner in layout pixels.
+    Coords(i32, i32),
+    /// Against one edge of the main screen, worked out from the live layout.
+    /// Only KDE reads the layout; elsewhere this falls back to the legacy
+    /// position of directly below a 1080p primary.
+    Side(Side),
+}
+
+/// Legacy position for compositors that cannot read the layout: below a
+/// primary at 0x0 that is no taller than 1080px.
+pub(crate) const FALLBACK_POSITION: (i32, i32) = (0, 1080);
+
+/// Top-left corner that puts a monitor of `size` against `side` of `primary`
+/// (`x, y, width, height`). The edge being shared is flush and the other axis
+/// is top- or left-aligned, which is where a pointer crosses most naturally.
+#[cfg_attr(not(feature = "plasma"), allow(dead_code))]
+pub fn place_beside(side: Side, primary: (i32, i32, i32, i32), size: (i32, i32)) -> (i32, i32) {
+    let (px, py, pw, ph) = primary;
+    match side {
+        Side::Right => (px + pw, py),
+        Side::Left => (px - size.0, py),
+        Side::Below => (px, py + ph),
+        Side::Above => (px, py - size.1),
+    }
+}
+
 impl Compositor {
     /// Identify the running compositor from its environment markers.
     ///
@@ -297,7 +351,7 @@ pub struct VirtualOutput {
 impl VirtualOutput {
     // `paint_cursor` only matters to the KDE backend.
     #[cfg_attr(not(feature = "plasma"), allow(unused_variables))]
-    pub fn create(layout: &Layout, paint_cursor: bool) -> Result<Self> {
+    pub fn create(layout: &Layout, placement: Placement, paint_cursor: bool) -> Result<Self> {
         let name = &layout.name;
         let compositor = Compositor::detect();
         match compositor {
@@ -337,8 +391,7 @@ impl VirtualOutput {
             #[cfg(feature = "plasma")]
             Compositor::Kwin => {
                 let (width, height) = layout.mode;
-                let (x, y) = layout.position;
-                return Self::create_kwin(name, width, height, layout.refresh, x, y, paint_cursor);
+                return Self::create_kwin(name, width, height, layout.refresh, placement, paint_cursor);
             }
             Compositor::Hyprland => {
                 let saved_states =
@@ -404,8 +457,7 @@ impl VirtualOutput {
         width: u32,
         height: u32,
         refresh: u32,
-        x: i32,
-        y: i32,
+        placement: Placement,
         paint_cursor: bool,
     ) -> Result<Self> {
         use capture::plasma::{CursorMode, PlasmaVirtualOutput};
@@ -427,7 +479,22 @@ impl VirtualOutput {
         // KWin prefixes virtual outputs with `Virtual-`. A failure to place the
         // output is not fatal: it still exists and still streams, only at
         // KWin's default spot beside the primary.
-        let target = format!("output.Virtual-{name}.position.{x},{y}");
+        let connector = format!("Virtual-{name}");
+        let (x, y) = match placement {
+            Placement::Coords(x, y) => (x, y),
+            Placement::Side(side) => match kwin_primary_geometry(&connector) {
+                Ok(primary) => {
+                    let spot = place_beside(side, primary, (width as i32, height as i32));
+                    tracing::info!("placing the output {side:?} of the main screen at {spot:?}");
+                    spot
+                }
+                Err(e) => {
+                    tracing::warn!("could not read the screen layout ({e:#}); using the default spot");
+                    FALLBACK_POSITION
+                }
+            },
+        };
+        let target = format!("output.{connector}.position.{x},{y}");
         if let Err(e) = run("kscreen-doctor", &[&target]) {
             tracing::warn!("could not position the output ({target}): {e:#}");
         }
@@ -589,4 +656,81 @@ fn set_kwin_refresh(connector: &str, width: u32, height: u32, refresh: u32) -> R
         hz - target
     );
     Ok(())
+}
+
+/// Position and logical size `(x, y, width, height)` of the main screen: the
+/// enabled output with the best (lowest) priority, ignoring `except`.
+#[cfg(feature = "plasma")]
+fn kwin_primary_geometry(except: &str) -> Result<(i32, i32, i32, i32)> {
+    let json = run("kscreen-doctor", &["-j"]).context("reading the KWin output list")?;
+    let doc: serde_json::Value = serde_json::from_str(&json).context("parsing kscreen JSON")?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .context("kscreen JSON has no outputs")?;
+
+    let primary = outputs
+        .iter()
+        .filter(|o| o.get("name").and_then(|n| n.as_str()) != Some(except))
+        .filter(|o| o.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+        .min_by_key(|o| o.get("priority").and_then(|p| p.as_i64()).unwrap_or(i64::MAX))
+        .context("no enabled screen to place the tablet beside")?;
+
+    let int = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_i64()).map(|v| v as i32);
+    let x = int(primary.get("pos").and_then(|p| p.get("x"))).unwrap_or(0);
+    let y = int(primary.get("pos").and_then(|p| p.get("y"))).unwrap_or(0);
+    let mut width = int(primary.get("size").and_then(|s| s.get("width")))
+        .context("screen has no width")?;
+    let mut height = int(primary.get("size").and_then(|s| s.get("height")))
+        .context("screen has no height")?;
+
+    // `size` is the mode in physical pixels. The layout works in logical
+    // pixels, so undo any scaling, and swap the axes for a screen turned on
+    // its side (KWin's rotation codes 2 and 8 are 90 and 270 degrees).
+    if matches!(primary.get("rotation").and_then(|r| r.as_i64()), Some(2) | Some(8)) {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let scale = primary
+        .get("scale")
+        .and_then(|s| s.as_f64())
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    Ok((
+        x,
+        y,
+        (f64::from(width) / scale).round() as i32,
+        (f64::from(height) / scale).round() as i32,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LAPTOP: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+    const TABLET: (i32, i32) = (2560, 1600);
+
+    #[test]
+    fn sits_against_each_edge_of_the_main_screen() {
+        assert_eq!(place_beside(Side::Right, LAPTOP, TABLET), (1920, 0));
+        assert_eq!(place_beside(Side::Below, LAPTOP, TABLET), (0, 1080));
+        assert_eq!(place_beside(Side::Left, LAPTOP, TABLET), (-2560, 0));
+        assert_eq!(place_beside(Side::Above, LAPTOP, TABLET), (0, -1600));
+    }
+
+    #[test]
+    fn follows_a_main_screen_that_is_not_at_the_origin() {
+        let offset = (1000, 200, 1920, 1080);
+        assert_eq!(place_beside(Side::Right, offset, TABLET), (2920, 200));
+        assert_eq!(place_beside(Side::Left, offset, TABLET), (-1560, 200));
+    }
+
+    #[test]
+    fn side_names_parse_with_friendly_aliases() {
+        assert_eq!("right".parse(), Ok(Side::Right));
+        assert_eq!("LEFT".parse(), Ok(Side::Left));
+        assert_eq!("top".parse(), Ok(Side::Above));
+        assert_eq!("bottom".parse(), Ok(Side::Below));
+        assert!("diagonal".parse::<Side>().is_err());
+    }
 }

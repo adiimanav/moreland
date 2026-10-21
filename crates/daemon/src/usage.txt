@@ -16,10 +16,14 @@ OPTIONS
                         120 measures better still; 144 saturates
     --bitrate <KBPS>    H.264 target bitrate           [default: 20000;
                         60000 on KDE, where encoding is NVENC/x264]
-    --position <X>      x offset of the virtual output [default: 0]
-    --position-y <Y>    y offset of the virtual output [default: 1080]
-                        default sits below a primary at 0x0, no taller than
-                        1080px; override either axis to fit your layout
+    --side <EDGE>       which edge of the main screen the tablet sits against:
+                        right, left, above or below       [default: right]
+                        (KDE reads your live layout; other compositors
+                        use the fixed position below)
+    --position <X>      exact x of the virtual output; overrides --side
+    --position-y <Y>    exact y of the virtual output; overrides --side
+                        without --side, the other compositors default to
+                        x 0, y 1080: below a primary no taller than 1080px
     --transform <N>     output rotation, 0-7 as in Hyprland [default: 0]
                         1 = 90 deg clockwise, i.e. a tablet on its side
                         applied with wlr-randr on labwc, which has no

@@ -2,7 +2,9 @@
 
 **Verified working on exactly one setup.** Everything else below is an
 assessment of what would be required, not a claim that it works. KDE Plasma has
-since been tested and is **verified blocked** — the reasons are recorded below.
+since been tested: the `ext-image-copy-capture` path is blocked on KWin, for the
+reasons recorded below, but a separate PipeWire backend now **works** — see
+[06-plasma-backend.md](06-plasma-backend.md).
 labwc has a backend contributed and used by its author, untested by the
 maintainer. GNOME and Sway remain untested.
 
@@ -133,7 +135,7 @@ Consequences worth knowing:
 Detection accepts `XDG_CURRENT_DESKTOP` of either `labwc` or `wlroots`, since
 labwc has reported both across versions.
 
-### KDE Plasma / KWin — tested, blocked
+### KDE Plasma / KWin — works (see below for why the old path is blocked)
 
 Tested on **KWin 6.7.4 / Plasma 6.7.4** in a Wayland session. Both
 questions this section used to pose are now answered.

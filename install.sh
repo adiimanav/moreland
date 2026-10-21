@@ -15,7 +15,14 @@ warn() { printf '\033[1;33m warn\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
 say "Building the daemon"
-cargo build --release --manifest-path "$REPO/Cargo.toml"
+# KDE Plasma needs the PipeWire/KDE backend, which pulls in libpipewire and the
+# plasma-wayland-protocols XML at build time; other compositors must not.
+FEATURES=""
+case "${XDG_CURRENT_DESKTOP:-}" in
+    *KDE*) FEATURES="--features plasma" ;;
+esac
+# shellcheck disable=SC2086
+cargo build --release --manifest-path "$REPO/Cargo.toml" $FEATURES
 
 say "Installing moreland to $BIN_DIR"
 mkdir -p "$BIN_DIR"

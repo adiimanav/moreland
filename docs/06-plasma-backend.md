@@ -1,23 +1,27 @@
 # Stage 6 — KDE Plasma backend
 
-**Status: the Wayland half works. A real second monitor can be created on KDE
-Plasma, with a PipeWire node for its contents.** The PipeWire consumer that
-turns that node into frames is not written yet, so nothing reaches the tablet
-and `moreland-doctor.sh` still reports `BLOCKED`.
+**Status: working end to end.** `moreland` run on KDE Plasma creates a real
+second monitor, captures it through PipeWire, encodes it and streams it to the
+tablet. Build with `cargo build --release --features plasma`.
 
-Verified on KWin 6.7.4 — a genuine output at `1920,0 1920x1200`, enabled, with
-PipeWire node 85, torn down cleanly when the client exits:
+Verified on KWin 6.7.4 with an NVIDIA GTX 1650 (NVENC) and a Galaxy Tab S9 FE+
+over USB. This is **one setup**; treat everything below as measured there.
 
 ```console
-$ plasma-probe
-  name           moreland
-  pipewire node  85
-  object serial  1586
-
-$ kscreen-doctor -o
-Output: 1 Virtual-moreland   enabled   Geometry: 1920,0 1920x1200
-Output: 2 eDP-1              enabled   Geometry: 0,0 1746x982
+$ moreland --once --seconds 40 --fps 60
+  frames captured   1259
+  bytes sent        51.7 MB
+  round trip: host send -> device render -> host ack
+    min           9.11 ms
+    median       22.88 ms
+    p95          42.83 ms
+    max          93.27 ms
 ```
+
+The sections below were written while the PipeWire half was still missing, and
+record how the Wayland half was established. They are kept because the KWin
+findings are still true; where they say "not implemented", read "see *What
+was built* at the end".
 
 Getting there needed a workaround for a KWin bug, described below.
 
@@ -240,3 +244,54 @@ To confirm the grant applies to a specific binary, copy `wayland-info` to that
 path, point a desktop entry's absolute `Exec` at it, rebuild the cache, and run
 it. Remember to remove the entry and rebuild again afterwards, or the stale
 cache will keep reporting a grant that no longer exists.
+
+## Result: the full pipeline
+
+```
+KWin  --zkde_screencast-->  virtual output + PipeWire node
+      --PwCapture-------->  CPU-memory BGRx frames (crates/capture/src/plasma/stream.rs)
+      --MemoryEncoder---->  nvh264enc | x264enc          (crates/encoder/src/memory.rs)
+      --Sender----------->  ADB -> tablet                 (unchanged)
+```
+
+Three decisions worth knowing:
+
+- **Frames are CPU memory, not DMA-BUFs.** That skips modifier negotiation with
+  KWin and is what NVENC needs anyway when KWin renders on a different GPU than
+  the encoder. On a single-GPU AMD or Intel machine a DMA-BUF path into VA-API
+  would remove a copy; it is not written yet.
+- **The encoder is chosen at runtime.** `nvh264enc` if installed, else
+  `x264enc`. Override with `MORELAND_ENCODER=nvenc|x264`.
+- **The Hyprland and labwc path is untouched.** Capture and encode sit behind a
+  `Pipeline` trait in `crates/daemon/src/session.rs`; the KDE one is selected
+  only when the output reports a PipeWire node.
+
+Measured here: `PwCapture` delivered up to 100 fps while a window was being
+dragged and ~0 when the monitor was idle (KWin sends a frame only when the
+output changes). `MemoryEncoder::push_frame` cost about 1 ms per 1920x1200
+frame. NVENC kept up with the capture rate: 1141 frames in, 1139 packets out
+over 15 s.
+
+## Building on Fedora
+
+- `sudo dnf install plasma-wayland-protocols pipewire-devel gstreamer1-devel
+  gstreamer1-plugins-base-devel gstreamer1-plugins-bad-free-devel`
+- The PipeWire bindings use `bindgen`, which on Fedora may not find the
+  compiler's own headers (`'stdbool.h' file not found`). Point it at GCC's:
+  `export BINDGEN_EXTRA_CLANG_ARGS="-I$(gcc -print-file-name=include)"`.
+- Stock Fedora Mesa has no H.264 VA-API encode. That does not matter here if
+  you have `nvh264enc` (NVIDIA) or `x264enc` (`gstreamer1-plugins-ugly`).
+  `mesa-va-drivers-freeworld` from RPM Fusion would add it, but it tracks
+  Mesa's version and can lag behind Fedora's updates.
+- The Android app needs JDK 17-21 for Gradle 8.11; Fedora 44 ships only 25.
+  Android Studio's bundled `jbr` works: `JAVA_HOME=~/android-studio/jbr
+  ANDROID_HOME=~/Android/Sdk ./gradlew assembleDebug`.
+
+## Known limits on KDE
+
+- The tablet's refresh rate follows what KWin produces, not `--fps`.
+- Idle desktops send almost no frames, so the tablet shows the last one.
+- Latency is in the same range as the Hyprland path but has a longer tail
+  (p95 43 ms, max 93 ms on the run above).
+- The output is positioned with `kscreen-doctor output.Virtual-<name>.position`;
+  if that fails the output still streams, at KWin's default position.

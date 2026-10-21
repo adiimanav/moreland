@@ -12,6 +12,7 @@ import android.view.Surface
 import java.io.DataInputStream
 import java.io.IOException
 import java.io.OutputStream
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 
@@ -36,6 +37,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         const val INPUT_TIMEOUT_MS = 2000L
         const val SURFACE_WAIT_MS = 5000L
         const val MAX_OUTBOX = 512
+        const val MAX_STAMPS = 256
     }
 
     @Volatile private var running = false
@@ -53,6 +55,17 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
      * writer thread, so the two can never interleave mid-message on the socket.
      */
     private val outbox = LinkedBlockingQueue<ByteArray>()
+
+    /** Clock readings for a frame on its way through the decoder. */
+    private class Stamp(val receivedNs: Long, val queuedNs: Long) {
+        @Volatile var readyNs = 0L
+    }
+
+    /** In-flight frames by presentation timestamp (microseconds). */
+    private val stamps = ConcurrentHashMap<Long, Stamp>()
+
+    /** When the previous frame reached the screen, for the interval between. */
+    @Volatile private var lastRenderedNs = 0L
 
     /** Frame rate of the current stream, or 0 before one starts. */
     @Volatile private var streamFps = 0
@@ -178,6 +191,8 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         requestFrameRate(target, streamFps)
         freeInputs.clear()
         outbox.clear()
+        stamps.clear()
+        lastRenderedNs = 0L
 
         // The operating-rate hint helps latency but some decoders refuse to
         // start with it at high size and rate combinations (the Exynos one does
@@ -199,6 +214,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
                     scratch = ByteArray(frame.length)
                 }
                 Protocol.readFully(input, scratch, frame.length)
+                val receivedNs = System.nanoTime()
 
                 val index = freeInputs.poll(INPUT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 if (index == null) {
@@ -211,7 +227,14 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
 
                 val flags = if (frame.keyframe) MediaCodec.BUFFER_FLAG_KEY_FRAME else 0
                 // MediaCodec timestamps are microseconds; the wire uses nanoseconds.
-                codec.queueInputBuffer(index, 0, frame.length, frame.ptsNs / 1000, flags)
+                val ptsUs = frame.ptsNs / 1000
+                // Stamp before queueing: the decoder may finish before this
+                // thread gets another instruction in.
+                stamps[ptsUs] = Stamp(receivedNs, System.nanoTime())
+                codec.queueInputBuffer(index, 0, frame.length, ptsUs, flags)
+                // Frames the decoder swallows (and, rarely, drops) never
+                // render, so never leave their stamps to pile up.
+                if (stamps.size > MAX_STAMPS) stamps.clear()
             }
         } finally {
             this.codec = null
@@ -263,6 +286,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
                 // session failing. Render first, account after; the
                 // acknowledgement is queued so this callback never blocks.
                 val render = surface?.isValid == true
+                stamps[info.presentationTimeUs]?.readyNs = System.nanoTime()
                 runCatching { codec.releaseOutputBuffer(index, render) }
                 if (render) {
                     framesDecoded++
@@ -281,7 +305,30 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         })
 
         try {
-            codec.configure(format, target, null, 0)
+            // Called when a frame actually reaches the screen, with the clock
+        // reading from that moment. This is the only honest "displayed" time:
+        // releasing the buffer merely schedules it for the next refresh.
+        codec.setOnFrameRenderedListener({ _, ptsUs, renderedNs ->
+            // `renderedNs` is on a clock of its own: differences between frames
+            // are meaningful, but it cannot be compared with System.nanoTime().
+            // The callback runs just after the frame is shown, so the time
+            // measured here stands in for it on the clock the stamps use.
+            val callbackNs = System.nanoTime()
+            val stamp = stamps.remove(ptsUs) ?: return@setOnFrameRenderedListener
+            val previous = lastRenderedNs
+            lastRenderedNs = renderedNs
+            outbox.offer(
+                Protocol.encodeTiming(
+                    ptsUs = ptsUs,
+                    queueWaitUs = (stamp.queuedNs - stamp.receivedNs) / 1000,
+                    decodeUs = (stamp.readyNs - stamp.queuedNs) / 1000,
+                    displayWaitUs = (callbackNs - stamp.readyNs) / 1000,
+                    renderIntervalUs = if (previous == 0L) 0 else (renderedNs - previous) / 1000,
+                )
+            )
+        }, null)
+
+        codec.configure(format, target, null, 0)
             codec.start()
         } catch (e: Exception) {
             runCatching { codec.release() }

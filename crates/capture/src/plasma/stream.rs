@@ -49,6 +49,8 @@ pub struct Frame {
     pub stride: u32,
     /// Time since the stream started; stands in for a presentation timestamp.
     pub pts: Duration,
+    /// When the frame was handed to us by PipeWire.
+    pub captured_at: Instant,
     pub data: Vec<u8>,
 }
 
@@ -245,6 +247,7 @@ fn run(
                 format,
                 stride,
                 pts: shared.started.elapsed(),
+                captured_at: Instant::now(),
                 data: pixels.to_vec(),
             };
             match shared.events.try_send(Event::Frame(frame)) {

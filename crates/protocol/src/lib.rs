@@ -28,6 +28,7 @@
 //! ```text
 //! 0x01  ack      8 bytes   pts u64, nanoseconds
 //! 0x02  pointer  28 bytes  see [`PointerEvent`]
+//! 0x03  timing   24 bytes  see [`Timing`]
 //! ```
 //!
 //! Every multi-byte field is **big-endian**. That is deliberate: Kotlin's
@@ -37,7 +38,7 @@
 use anyhow::{bail, Result};
 
 pub const MAGIC: [u8; 4] = *b"MRLD";
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 pub const STREAM_HEADER_LEN: usize = 16;
 pub const FRAME_HEADER_LEN: usize = 16;
 
@@ -144,6 +145,7 @@ impl FrameHeader {
 /// Device → host message types.
 pub const MSG_ACK: u8 = 0x01;
 pub const MSG_POINTER: u8 = 0x02;
+pub const MSG_TIMING: u8 = 0x03;
 
 /// Device → host acknowledgement, sent when a frame is handed to the display.
 ///
@@ -280,10 +282,63 @@ impl PointerEvent {
     }
 }
 
+pub const TIMING_LEN: usize = 24;
+
+/// Where one frame spent its time on the tablet, in microseconds. All four
+/// figures are differences between readings of the tablet's own clock, so they
+/// mean something even though host and tablet clocks are unrelated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timing {
+    /// Identifies the frame: the presentation timestamp it was sent with,
+    /// truncated to microseconds the way the decoder reports it.
+    pub pts_us: u64,
+    /// From the whole frame arriving to the decoder accepting it. Non-zero
+    /// when the decoder had no free input buffer.
+    pub queue_wait_us: u32,
+    /// From the decoder accepting the frame to the picture being ready.
+    pub decode_us: u32,
+    /// From the picture being ready to it actually reaching the screen, which
+    /// the display only does on a refresh boundary.
+    pub display_wait_us: u32,
+    /// Time since the previous frame reached the screen; 0 for the first. The
+    /// direct measure of stutter: an even stream has near-constant values.
+    pub render_interval_us: u32,
+}
+
+impl Timing {
+    fn encode(&self) -> [u8; 1 + TIMING_LEN] {
+        let mut buf = [0u8; 1 + TIMING_LEN];
+        buf[0] = MSG_TIMING;
+        buf[1..9].copy_from_slice(&self.pts_us.to_be_bytes());
+        buf[9..13].copy_from_slice(&self.queue_wait_us.to_be_bytes());
+        buf[13..17].copy_from_slice(&self.decode_us.to_be_bytes());
+        buf[17..21].copy_from_slice(&self.display_wait_us.to_be_bytes());
+        buf[21..25].copy_from_slice(&self.render_interval_us.to_be_bytes());
+        buf
+    }
+
+    fn decode(payload: &[u8]) -> Self {
+        let u32_at = |at: usize| u32::from_be_bytes(payload[at..at + 4].try_into().unwrap());
+        Self {
+            pts_us: u64::from_be_bytes(payload[0..8].try_into().unwrap()),
+            queue_wait_us: u32_at(8),
+            decode_us: u32_at(12),
+            display_wait_us: u32_at(16),
+            render_interval_us: u32_at(20),
+        }
+    }
+}
+
+/// Wire encoding of a [`Timing`] message, for tests and tools.
+pub fn encode_timing(timing: &Timing) -> [u8; 1 + TIMING_LEN] {
+    timing.encode()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DeviceMessage {
     Ack { pts_ns: u64 },
     Pointer(PointerEvent),
+    Timing(Timing),
 }
 
 /// Reassembles device → host messages from a byte stream that may deliver them
@@ -308,6 +363,7 @@ impl MessageParser {
             let payload_len = match self.buf[at] {
                 MSG_ACK => ACK_LEN,
                 MSG_POINTER => POINTER_LEN,
+                MSG_TIMING => TIMING_LEN,
                 other => bail!("unknown device message type 0x{other:02x}"),
             };
             if self.buf.len() - at < 1 + payload_len {
@@ -318,6 +374,7 @@ impl MessageParser {
                 MSG_ACK => DeviceMessage::Ack {
                     pts_ns: u64::from_be_bytes(payload.try_into().unwrap()),
                 },
+                MSG_TIMING => DeviceMessage::Timing(Timing::decode(payload)),
                 _ => DeviceMessage::Pointer(PointerEvent::decode(payload)?),
             });
             at += 1 + payload_len;
@@ -402,6 +459,29 @@ mod tests {
                 DeviceMessage::Ack { pts_ns: 43 },
             ]
         );
+    }
+
+    #[test]
+    fn timing_round_trips_between_other_messages() {
+        let timing = Timing {
+            pts_us: 123_456_789,
+            queue_wait_us: 1,
+            decode_us: 7_800,
+            display_wait_us: 9_100,
+            render_interval_us: 16_667,
+        };
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&encode_ack(1));
+        bytes.extend_from_slice(&encode_timing(&timing));
+        bytes.extend_from_slice(&sample_pointer().encode());
+
+        let mut parser = MessageParser::new();
+        let mut out = Vec::new();
+        for byte in &bytes {
+            out.extend(parser.push(&[*byte]).unwrap());
+        }
+        assert_eq!(out[1], DeviceMessage::Timing(timing));
+        assert_eq!(out.len(), 3);
     }
 
     #[test]

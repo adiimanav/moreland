@@ -89,6 +89,94 @@ impl Config {
     }
 }
 
+/// The base GStreamer adds to every timestamp leaving an encoder, in
+/// microseconds as this code sees it.
+const ENCODER_PTS_BASE_US: u64 = 3_600_000_000_000;
+
+/// How far an encoder may move a timestamp and still be matched to its frame.
+const MATCH_WINDOW_US: u64 = 12_000;
+
+/// Timestamps of one frame on the host.
+#[derive(Clone, Copy)]
+struct FrameTrace {
+    captured: Instant,
+    pushed: Instant,
+    encoded: Option<Instant>,
+    sent: Option<Instant>,
+}
+
+/// Per-frame timing, recorded only when `--stats` asks for it so a normal
+/// session pays nothing.
+struct Trace {
+    enabled: bool,
+    /// Keyed by presentation timestamp in microseconds, which every stage
+    /// carries unchanged and the tablet echoes back.
+    frames: Mutex<std::collections::HashMap<u64, FrameTrace>>,
+    tablet: Mutex<Vec<protocol::Timing>>,
+}
+
+impl Trace {
+    fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            frames: Mutex::new(std::collections::HashMap::new()),
+            tablet: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn pushed(&self, pts_us: u64, captured: Instant) {
+        if self.enabled {
+            self.frames.lock().unwrap().insert(
+                pts_us,
+                FrameTrace {
+                    captured,
+                    pushed: Instant::now(),
+                    encoded: None,
+                    sent: None,
+                },
+            );
+        }
+    }
+
+    /// Note that the encoder produced a packet and return the key of the frame
+    /// it belongs to.
+    ///
+    /// The encoder re-stamps its output: GStreamer adds a fixed base of an hour
+    /// and nudges each timestamp by a few milliseconds, so the packet's
+    /// timestamp is not the one that went in. Match instead to the nearest
+    /// pushed frame that has not been matched yet; frames are further apart
+    /// than the nudge.
+    fn encoded(&self, pts_us: u64) -> Option<u64> {
+        if !self.enabled {
+            return None;
+        }
+        let wanted = pts_us.saturating_sub(ENCODER_PTS_BASE_US);
+        let mut frames = self.frames.lock().unwrap();
+        let key = frames
+            .iter()
+            .filter(|(_, f)| f.encoded.is_none())
+            .map(|(k, _)| *k)
+            .filter(|k| k.abs_diff(wanted) <= MATCH_WINDOW_US)
+            .min_by_key(|k| k.abs_diff(wanted))?;
+        frames.get_mut(&key)?.encoded = Some(Instant::now());
+        Some(key)
+    }
+
+    fn sent(&self, key: Option<u64>) {
+        if let Some(key) = key.filter(|_| self.enabled) {
+            if let Some(frame) = self.frames.lock().unwrap().get_mut(&key) {
+                frame.sent = Some(Instant::now());
+            }
+        }
+    }
+
+    fn tablet(&self, timing: protocol::Timing) {
+        if self.enabled {
+            self.tablet.lock().unwrap().push(timing);
+        }
+    }
+}
+
 /// Everything between the virtual output and the encoded packets: how frames
 /// are captured and which encoder they feed. Compositors differ here, not in
 /// the transport.
@@ -104,7 +192,13 @@ trait Pipeline {
     /// Capture one frame and submit it for encoding, returning whether one was
     /// submitted. `index` numbers submitted frames from zero; `frame_ns` is the
     /// nominal frame interval.
-    fn step(&mut self, output: &mut VirtualOutput, index: u64, frame_ns: u64) -> Result<bool>;
+    fn step(
+        &mut self,
+        output: &mut VirtualOutput,
+        index: u64,
+        frame_ns: u64,
+        trace: &Trace,
+    ) -> Result<bool>;
 }
 
 /// `ext-image-copy-capture` into the zero-copy VA-API encoder. Hyprland, labwc.
@@ -151,8 +245,15 @@ impl Pipeline for ExtPipeline {
         self.encoder.clone()
     }
 
-    fn step(&mut self, _output: &mut VirtualOutput, index: u64, frame_ns: u64) -> Result<bool> {
+    fn step(
+        &mut self,
+        _output: &mut VirtualOutput,
+        index: u64,
+        frame_ns: u64,
+        trace: &Trace,
+    ) -> Result<bool> {
         let timing = self.capture.capture_frame()?;
+        let captured = Instant::now();
         let dmabuf = self
             .capture
             .dmabuf(timing.buffer_index)
@@ -163,6 +264,7 @@ impl Pipeline for ExtPipeline {
             dmabuf.planes[0].stride,
             index * frame_ns,
         )?;
+        trace.pushed(index * frame_ns / 1000, captured);
         Ok(true)
     }
 }
@@ -245,7 +347,13 @@ impl Pipeline for PlasmaPipeline {
         self.encoder.clone()
     }
 
-    fn step(&mut self, output: &mut VirtualOutput, _index: u64, _frame_ns: u64) -> Result<bool> {
+    fn step(
+        &mut self,
+        output: &mut VirtualOutput,
+        _index: u64,
+        _frame_ns: u64,
+        trace: &Trace,
+    ) -> Result<bool> {
         use capture::plasma::stream::Event;
 
         if !output.poll()? {
@@ -256,11 +364,9 @@ impl Pipeline for PlasmaPipeline {
         // shutdown flag and the Wayland connection serviced.
         match self.capture.next_event(Duration::from_millis(20))? {
             Some(Event::Frame(frame)) => {
-                self.encoder.push_owned(
-                    frame.data,
-                    frame.stride,
-                    frame.pts.as_nanos() as u64,
-                )?;
+                let (pts_ns, captured) = (frame.pts.as_nanos() as u64, frame.captured_at);
+                self.encoder.push_owned(frame.data, frame.stride, pts_ns)?;
+                trace.pushed(pts_ns / 1000, captured);
                 return Ok(true);
             }
             Some(Event::Format(format)) if (format.width, format.height) != self.size => {
@@ -382,6 +488,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let running = Arc::new(AtomicBool::new(true));
     let sent_at: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(VecDeque::new()));
     let round_trips: Arc<Mutex<Vec<Duration>>> = Arc::new(Mutex::new(Vec::new()));
+    let trace = Arc::new(Trace::new(config.stats));
 
     // Touch is a bonus: a session without it still streams the picture.
     let mut remote_input = match output.kwin_connector() {
@@ -400,6 +507,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         let sent_at = Arc::clone(&sent_at);
         let round_trips = Arc::clone(&round_trips);
         let running = Arc::clone(&running);
+        let trace = Arc::clone(&trace);
         std::thread::spawn(move || {
             let mut parser = protocol::MessageParser::new();
             let mut buf = [0u8; 512];
@@ -431,6 +539,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
                                 round_trips.lock().unwrap().push(sent.elapsed());
                             }
                         }
+                        protocol::DeviceMessage::Timing(timing) => trace.tablet(timing),
                         protocol::DeviceMessage::Pointer(pointer) => {
                             if let Some(remote) = remote_input.as_mut() {
                                 if let Err(e) = remote.handle(&pointer) {
@@ -459,13 +568,16 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         let running = Arc::clone(&running);
         let link_down = Arc::clone(&link_down);
         let sent_at = Arc::clone(&sent_at);
+        let trace = Arc::clone(&trace);
         std::thread::spawn(move || -> (Sender, Result<()>) {
             let outcome = (|| -> Result<()> {
                 while running.load(Ordering::Relaxed) {
                     match packets.pull_packet(Duration::from_millis(100))? {
                         Some(p) => {
+                            let key = trace.encoded(p.pts_ns / 1000);
                             sent_at.lock().unwrap().push_back(Instant::now());
                             sender.send_frame(&p.data, p.pts_ns, p.keyframe)?;
+                            trace.sent(key);
                         }
                         None => continue,
                     }
@@ -483,7 +595,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let mut index = 0u64;
     let result = (|| -> Result<()> {
         while !shutdown.load(Ordering::Relaxed) && !link_down.load(Ordering::Relaxed) {
-            if pipeline.step(&mut output, index, frame_duration_ns)? {
+            if pipeline.step(&mut output, index, frame_duration_ns, &trace)? {
                 index += 1;
             }
         }
@@ -500,7 +612,13 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     let result = sent.and(result);
 
     if config.stats {
-        report(&round_trips.lock().unwrap(), index, sender.bytes_sent(), dropped);
+        report(
+            &round_trips.lock().unwrap(),
+            index,
+            sender.bytes_sent(),
+            dropped,
+            &trace,
+        );
     }
 
     // Leaving the app in the foreground with a dead socket is confusing; send
@@ -512,23 +630,87 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
     result
 }
 
-fn report(trips: &[Duration], frames: u64, bytes: u64, dropped: u64) {
+fn report(trips: &[Duration], frames: u64, bytes: u64, dropped: u64, trace: &Trace) {
     println!("\n  frames captured   {frames}");
     println!("  bytes sent        {:.1} MB", bytes as f64 / 1e6);
     println!("  acks received     {}", trips.len());
     if dropped > 0 {
-        println!("  frames dropped    {dropped}  (encoder could not keep up)");
+        println!("  frames dropped    {dropped}  (queue full; mostly at startup)");
     }
     if trips.is_empty() {
         println!("\n  no acknowledgements — check `adb logcat -s Moreland`");
         return;
     }
-    let mut trips = trips.to_vec();
-    trips.sort_unstable();
     let ms = |d: Duration| d.as_secs_f64() * 1000.0;
-    println!("\n  round trip: host send -> device render -> host ack");
-    println!("    min       {:>8.2} ms", ms(trips[0]));
-    println!("    median    {:>8.2} ms", ms(trips[trips.len() / 2]));
-    println!("    p95       {:>8.2} ms", ms(trips[trips.len() * 95 / 100]));
-    println!("    max       {:>8.2} ms", ms(trips[trips.len() - 1]));
+    let mut round: Vec<f64> = trips.iter().map(|d| ms(*d)).collect();
+
+    println!("\n  where the time goes                   median      p95      max");
+    row("host: capture -> encoder in", &mut stage(trace, |f| Some((f.pushed - f.captured).as_secs_f64())));
+    row("host: encode", &mut stage(trace, |f| f.encoded.map(|e| (e - f.pushed).as_secs_f64())));
+    row("host: socket write", &mut stage(trace, |f| match (f.encoded, f.sent) {
+        (Some(e), Some(s)) => Some((s - e).as_secs_f64()),
+        _ => None,
+    }));
+    row("round trip: send -> tablet -> ack", &mut round);
+
+    let tablet = trace.tablet.lock().unwrap();
+    if tablet.is_empty() {
+        println!("\n  (no tablet timings: is the app up to date?)");
+        return;
+    }
+    let col = |f: fn(&protocol::Timing) -> u32| -> Vec<f64> {
+        tablet.iter().map(|t| f64::from(f(t)) / 1000.0).collect()
+    };
+    println!("\n  on the tablet");
+    row("wait for a decoder input buffer", &mut col(|t| t.queue_wait_us));
+    row("decode", &mut col(|t| t.decode_us));
+    row("wait for the screen refresh", &mut col(|t| t.display_wait_us));
+
+    // The interval between frames reaching the glass is the stutter measure.
+    let mut intervals: Vec<f64> = tablet
+        .iter()
+        .filter(|t| t.render_interval_us > 0)
+        .map(|t| f64::from(t.render_interval_us) / 1000.0)
+        .collect();
+    if intervals.len() > 10 {
+        let mut sorted = intervals.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let typical = sorted[sorted.len() / 2];
+        let late = intervals.iter().filter(|v| **v > typical * 1.5).count();
+        let early = intervals.iter().filter(|v| **v < typical * 0.5).count();
+        println!("\n  frames reaching the screen, spacing");
+        row("interval between frames", &mut intervals);
+        println!(
+            "    typical {typical:.1} ms; {late} late (>1.5x), {early} bunched (<0.5x) of {} \
+             ({:.1}% uneven)",
+            sorted.len(),
+            100.0 * (late + early) as f64 / sorted.len() as f64
+        );
+    }
+}
+
+/// One stage's durations across all fully traced frames, in milliseconds.
+fn stage(trace: &Trace, pick: impl Fn(&FrameTrace) -> Option<f64>) -> Vec<f64> {
+    trace
+        .frames
+        .lock()
+        .unwrap()
+        .values()
+        .filter_map(|f| pick(f).map(|secs| secs * 1000.0))
+        .collect()
+}
+
+fn row(label: &str, values: &mut Vec<f64>) {
+    if values.is_empty() {
+        println!("    {label:<34}  (no data)");
+        return;
+    }
+    values.sort_by(|a, b| a.total_cmp(b));
+    let at = |q: f64| values[((values.len() - 1) as f64 * q) as usize];
+    println!(
+        "    {label:<34} {:>7.2}  {:>7.2}  {:>7.2}",
+        at(0.5),
+        at(0.95),
+        values[values.len() - 1]
+    );
 }

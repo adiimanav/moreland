@@ -17,7 +17,7 @@ object Protocol {
     const val SOCKET_NAME = "moreland"
 
     private const val MAGIC = 0x4D524C44 // "MRLD"
-    const val VERSION = 2
+    const val VERSION = 3
 
     const val STREAM_HEADER_LEN = 16
     const val FRAME_HEADER_LEN = 16
@@ -27,6 +27,8 @@ object Protocol {
     /** Device -> host message types. */
     const val MSG_ACK = 0x01
     const val MSG_POINTER = 0x02
+    const val MSG_TIMING = 0x03
+    const val TIMING_LEN = 24
 
     const val ACTION_DOWN = 0
     const val ACTION_UP = 1
@@ -145,6 +147,27 @@ object Protocol {
         buf.putFloat(pressure)
         buf.putFloat(tilt)
         buf.putFloat(orientation)
+        return buf.array()
+    }
+
+    /**
+     * Where one frame spent its time on this device, in microseconds. Each
+     * figure is a difference between two readings of the device's own clock.
+     */
+    fun encodeTiming(
+        ptsUs: Long,
+        queueWaitUs: Long,
+        decodeUs: Long,
+        displayWaitUs: Long,
+        renderIntervalUs: Long,
+    ): ByteArray {
+        val buf = ByteBuffer.allocate(1 + TIMING_LEN)
+        buf.put(MSG_TIMING.toByte())
+        buf.putLong(ptsUs)
+        buf.putInt(queueWaitUs.coerceIn(0, 0xffffffffL).toInt())
+        buf.putInt(decodeUs.coerceIn(0, 0xffffffffL).toInt())
+        buf.putInt(displayWaitUs.coerceIn(0, 0xffffffffL).toInt())
+        buf.putInt(renderIntervalUs.coerceIn(0, 0xffffffffL).toInt())
         return buf.array()
     }
 }

@@ -26,7 +26,7 @@ fn main() -> Result<()> {
     let mut seconds = 10u64;
     let mut out_path = "kwin-probe.h264".to_string();
     let mut backend = Backend::detect().context("no H.264 encoder element installed")?;
-    let (mut fps, mut bitrate) = (60u32, 20_000u32);
+    let (mut fps, mut bitrate) = (60u32, encoder::memory::DEFAULT_BITRATE_KBPS);
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {

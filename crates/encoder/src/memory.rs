@@ -67,6 +67,16 @@ impl std::str::FromStr for Backend {
     }
 }
 
+/// NVENC preset, `p1` (fastest) to `p7` (best quality). `p5` is the default:
+/// a GTX 1650 holds 60 fps at 1920x1200 with it. Override with
+/// `MORELAND_NVENC_PRESET` to trade latency for sharpness.
+fn nvenc_preset() -> String {
+    std::env::var("MORELAND_NVENC_PRESET")
+        .ok()
+        .filter(|p| matches!(p.as_str(), "p1" | "p2" | "p3" | "p4" | "p5" | "p6" | "p7"))
+        .unwrap_or_else(|| "p5".to_string())
+}
+
 pub struct MemoryEncoderConfig {
     pub backend: Backend,
     pub width: u32,
@@ -77,6 +87,11 @@ pub struct MemoryEncoderConfig {
     pub keyframe_interval: u32,
 }
 
+/// Default bitrate. Well above the VA-API path's 20 Mbps: the link is USB, so
+/// bandwidth is cheap, and desktop content (text, thin lines) is exactly what
+/// low bitrates smear.
+pub const DEFAULT_BITRATE_KBPS: u32 = 60_000;
+
 impl MemoryEncoderConfig {
     pub fn new(backend: Backend, width: u32, height: u32, framerate: u32) -> Self {
         Self {
@@ -84,7 +99,7 @@ impl MemoryEncoderConfig {
             width,
             height,
             framerate,
-            bitrate_kbps: 20_000,
+            bitrate_kbps: DEFAULT_BITRATE_KBPS,
             keyframe_interval: 600,
         }
     }
@@ -128,20 +143,43 @@ impl MemoryEncoder {
 
         match config.backend {
             Backend::Nvenc => {
+                // One frame of buffering keeps VBR from spending a burst on a
+                // scene change that the link then has to absorb as a stall.
+                let vbv = config.bitrate_kbps / config.framerate.max(1);
                 let encoder = gst::ElementFactory::make("nvh264enc")
-                    .property_from_str("rc-mode", "cbr")
+                    .property_from_str("rc-mode", "vbr")
                     .property("bitrate", config.bitrate_kbps)
+                    .property("max-bitrate", config.bitrate_kbps + config.bitrate_kbps / 2)
+                    .property("vbv-buffer-size", vbv.max(1) * 2)
                     .property("gop-size", config.keyframe_interval as i32)
                     .property("bframes", 0u32)
                     .property("aud", true)
                     .property("repeat-sequence-header", true)
                     .property("zerolatency", true)
+                    .property("cabac", true)
+                    // Redistributes bits towards flat areas and text edges,
+                    // which is where blocking shows on a desktop.
+                    .property("spatial-aq", true)
                     // p1..p7 with a tune replaces the deprecated named presets.
-                    .property_from_str("preset", "p3")
-                    .property_from_str("tune", "ultra-low-latency")
+                    .property_from_str("preset", &nvenc_preset())
+                    .property_from_str("tune", "low-latency")
                     .build()
                     .context("creating nvh264enc — is the NVIDIA driver loaded?")?;
                 elements.push(encoder);
+
+                // NVENC emits Constrained Baseline unless told otherwise, the
+                // least efficient profile; every Android hardware decoder
+                // handles High.
+                let high = gst::ElementFactory::make("capsfilter")
+                    .property(
+                        "caps",
+                        gst::Caps::builder("video/x-h264")
+                            .field("profile", "high")
+                            .build(),
+                    )
+                    .build()
+                    .context("creating profile capsfilter")?;
+                elements.push(high);
             }
             Backend::X264 => {
                 let convert = gst::ElementFactory::make("videoconvert")

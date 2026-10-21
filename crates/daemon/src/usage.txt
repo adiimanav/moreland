@@ -13,7 +13,8 @@ OPTIONS
     --height <PX>       pin height (requires --width)
     --fps <N>           virtual output refresh rate    [default: 90]
                         120 measures better still; 144 saturates
-    --bitrate <KBPS>    H.264 target bitrate           [default: 20000]
+    --bitrate <KBPS>    H.264 target bitrate           [default: 20000;
+                        60000 on KDE, where encoding is NVENC/x264]
     --position <X>      x offset of the virtual output [default: 0]
     --position-y <Y>    y offset of the virtual output [default: 1080]
                         default sits below a primary at 0x0, no taller than

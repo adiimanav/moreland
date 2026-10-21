@@ -248,6 +248,19 @@ impl MemoryEncoder {
         })
     }
 
+    /// Submit a frame the caller no longer needs, without copying it again when
+    /// its rows are already tightly packed. A 2560x1600 frame is 16 MB, and the
+    /// capture side has already copied it once out of PipeWire's buffer.
+    pub fn push_owned(&self, mut data: Vec<u8>, stride: u32, pts_ns: u64) -> Result<()> {
+        let row = self.width as usize * BYTES_PER_PIXEL;
+        let size = row * self.height as usize;
+        if stride as usize == row && data.len() >= size {
+            data.truncate(size);
+            return self.push_packed(data, pts_ns);
+        }
+        self.push_frame(&data, stride, pts_ns)
+    }
+
     /// Submit one frame. `stride` is the source row pitch in bytes.
     ///
     /// Rows are repacked when the pitch is not tight, because the pipeline's
@@ -277,6 +290,10 @@ impl MemoryEncoder {
             out
         };
 
+        self.push_packed(packed, pts_ns)
+    }
+
+    fn push_packed(&self, packed: Vec<u8>, pts_ns: u64) -> Result<()> {
         let mut buffer = gst::Buffer::from_mut_slice(packed);
         buffer
             .get_mut()

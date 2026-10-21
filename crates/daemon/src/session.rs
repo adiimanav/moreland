@@ -256,8 +256,11 @@ impl Pipeline for PlasmaPipeline {
         // shutdown flag and the Wayland connection serviced.
         match self.capture.next_event(Duration::from_millis(20))? {
             Some(Event::Frame(frame)) => {
-                self.encoder
-                    .push_frame(&frame.data, frame.stride, frame.pts.as_nanos() as u64)?;
+                self.encoder.push_owned(
+                    frame.data,
+                    frame.stride,
+                    frame.pts.as_nanos() as u64,
+                )?;
                 return Ok(true);
             }
             Some(Event::Format(format)) if (format.width, format.height) != self.size => {

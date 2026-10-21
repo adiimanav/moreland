@@ -26,7 +26,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 /// Frames buffered between the PipeWire thread and the consumer.
-const QUEUE_DEPTH: usize = 2;
+const QUEUE_DEPTH: usize = 3;
 
 /// Largest frame either dimension may negotiate to.
 const MAX_DIMENSION: u32 = 8192;

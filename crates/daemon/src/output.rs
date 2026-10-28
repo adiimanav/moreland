@@ -18,6 +18,8 @@
 use anyhow::{bail, Context, Result};
 use std::process::Command;
 
+use crate::display::{lua_string, Layout};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Compositor {
     Hyprland,
@@ -218,25 +220,6 @@ fn hyprland_monitor_state() -> Result<Vec<MonitorState>> {
     Ok(states)
 }
 
-fn lua_string(value: &str) -> String {
-    let mut escaped = String::with_capacity(value.len() + 2);
-    escaped.push('"');
-
-    for ch in value.chars() {
-        match ch {
-            '\\' => escaped.push_str("\\\\"),
-            '"' => escaped.push_str("\\\""),
-            '\n' => escaped.push_str("\\n"),
-            '\r' => escaped.push_str("\\r"),
-            '\t' => escaped.push_str("\\t"),
-            _ => escaped.push(ch),
-        }
-    }
-
-    escaped.push('"');
-    escaped
-}
-
 fn restore_hyprland_monitor_state(
     states: &[MonitorState],
     excluded_output: &str,
@@ -288,14 +271,8 @@ pub struct VirtualOutput {
 }
 
 impl VirtualOutput {
-    pub fn create(
-        name: &str,
-        width: u32,
-        height: u32,
-        refresh: u32,
-        x: i32,
-        y: i32,
-    ) -> Result<Self> {
+    pub fn create(layout: &Layout) -> Result<Self> {
+        let name = &layout.name;
         let compositor = Compositor::detect();
         match compositor {
             // labwc cannot create an output at runtime — wlroots only builds
@@ -317,16 +294,31 @@ impl VirtualOutput {
                          See docs/COMPATIBILITY.md."
                     );
                 }
+                // Mode and position stay the user's; rotation is the one
+                // property `--transform` promises, so honour it here too.
+                if layout.transform != 0 {
+                    let rotation = layout.wlr_randr_transform().with_context(|| {
+                        format!(
+                            "transform {} is not a rotation wlr-randr knows",
+                            layout.transform
+                        )
+                    })?;
+                    run(
+                        "wlr-randr",
+                        &["--output", name.as_str(), "--transform", rotation],
+                    )
+                    .with_context(|| format!("rotating labwc output {name}"))?;
+                }
                 return Ok(Self {
                     compositor,
                     name: name.to_string(),
                 });
             }
             Compositor::Hyprland => {
-                let saved_states = hyprland_monitor_state()
-                    .context("saving Hyprland monitor state")?;
+                let saved_states =
+                    hyprland_monitor_state().context("saving Hyprland monitor state")?;
 
-                if saved_states.iter().any(|monitor| monitor.name == name) {
+                if saved_states.iter().any(|monitor| monitor.name == *name) {
                     tracing::debug!("reusing existing output {name}");
                 } else {
                     // Hyprland accepts an explicit name here, so the result is
@@ -338,23 +330,19 @@ impl VirtualOutput {
                     std::thread::sleep(std::time::Duration::from_millis(400));
                 }
 
-                let spec = format!("{name},{width}x{height}@{refresh},{x}x{y},1");
+                let spec = layout.hyprland_rule();
                 let reply = run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
 
-                // Hyprland's Lua config parser (0.56+) refuses `keyword`
-                // outright — and refuses it on stdout with a zero exit
-                // status, so `run` reports success and the output silently
-                // keeps the compositor's defaults. Re-issue the same rule
-                // through `eval`, which that parser does accept.
+                // A compositor running the non-legacy (Lua) config parser
+                // rejects `keyword` with "keyword can't work with non-legacy
+                // parsers. Use eval." on stdout, with a zero exit status, so
+                // `run` reports success and the output silently keeps the
+                // compositor's defaults. Re-issue the same rule through
+                // `eval`, which that parser accepts. The classic parser, which
+                // the reference machine runs, applies the keyword directly.
                 if reply.contains("non-legacy parsers") {
-                    let output = lua_string(name);
-                    let lua = format!(
-                        "hl.monitor({{ output = {}, \
-                         mode = \"{width}x{height}@{refresh}\", \
-                         position = \"{x}x{y}\", scale = 1 }})",
-                        output
-                    );
+                    let lua = layout.hyprland_lua();
                     run("hyprctl", &["eval", &lua])
                         .with_context(|| format!("configuring output as {lua}"))?;
                 }
@@ -369,7 +357,7 @@ impl VirtualOutput {
         std::thread::sleep(std::time::Duration::from_millis(400));
         Ok(Self {
             compositor,
-            name: name.to_string(),
+            name: name.clone(),
         })
     }
 

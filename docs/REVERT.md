@@ -48,6 +48,9 @@ Both commands affect only the running compositor. Neither was written to
 **If you added a `monitor=` line to `hyprland.conf` yourself**, remove it
 manually — this project did not put it there.
 
+The same goes for a `moreland.service.d/` drop-in holding your layout: the
+installer only writes the main unit, so a drop-in is yours to keep or delete.
+
 ### Workspace displacement
 
 Creating an output moves a workspace onto it (workspace 3 here). Removing the

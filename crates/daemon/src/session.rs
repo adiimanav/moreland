@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use transport::{adb, stream_header, Sender};
 
+use crate::display::{self, Layout};
 use crate::output::VirtualOutput;
 
 const APP_PACKAGE: &str = "com.moreland.display";
@@ -28,6 +29,9 @@ pub struct Config {
     pub bitrate_kbps: u32,
     pub position_x: i32,
     pub position_y: i32,
+    /// Output rotation, 1 = 90 degrees clockwise. Must be repeated in the
+    /// monitor rule the daemon issues, or Hyprland resets it to 0.
+    pub transform: i32,
     pub output_name: String,
     /// Composite the mouse cursor into the streamed frames.
     pub paint_cursor: bool,
@@ -55,6 +59,7 @@ impl Default for Config {
             // layout.
             position_x: 0,
             position_y: 1080,
+            transform: 0,
             output_name: capture::VIRTUAL_OUTPUT_NAME.to_string(),
             paint_cursor: false,
             stats: false,
@@ -86,7 +91,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         Some(explicit) => explicit,
         None => {
             let panel = adb::display_size(serial)?;
-            let scaled = adb::stream_resolution(panel, config.max_width);
+            let scaled = display::panel_mode(panel, config.max_width);
             tracing::info!(
                 "device panel {}x{} (landscape) -> streaming {}x{}",
                 panel.0,
@@ -98,21 +103,27 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         }
     };
 
-    let output = VirtualOutput::create(
-        &config.output_name,
-        width,
-        height,
-        config.fps,
-        config.position_x,
-        config.position_y,
-    )?;
+    let layout = Layout {
+        name: config.output_name.clone(),
+        mode: (width, height),
+        refresh: config.fps,
+        position: (config.position_x, config.position_y),
+        scale: 1.0,
+        transform: config.transform,
+    };
+
+    let output = VirtualOutput::create(&layout)?;
     if output.applied_mode() {
+        let (logical_width, logical_height) = layout.logical_size();
         tracing::info!(
-            "virtual output {} at {}x{}@{}",
+            "virtual output {} at {}x{}@{} transform {} -> logical {}x{}",
             output.name(),
             width,
             height,
-            config.fps
+            config.fps,
+            layout.transform,
+            logical_width,
+            logical_height
         );
     } else {
         tracing::info!(

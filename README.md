@@ -144,9 +144,15 @@ moreland --seconds 15     stop after 15 s and print latency statistics
                            default sits below a primary at 0x0, no taller
                            than 1080px; override either axis to fit your
                            layout
+--transform <N>            output rotation, 0-7 as in Hyprland [default: 0]
+                           1 = 90 deg clockwise, i.e. a tablet on its side;
+                           applied with wlr-randr on labwc
 --output-name <NAME>       name of the virtual output    [default: moreland]
                            required on labwc, which cannot create one and
                            must be pointed at an existing headless output
+--print-rule               print the compositor configuration for the current
+                           options, including the `monitor=` line for
+                           hyprland.conf, then exit
 --show-cursor              composite the mouse cursor into the stream
 ```
 

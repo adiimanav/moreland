@@ -151,13 +151,63 @@ moreland --max-width 2400        cap the auto-detected width
 moreland --native                stream the tablet's full panel resolution
 moreland --width 2400 --height 1500   pin an explicit size (both required)
 moreland --bitrate 30000
+moreland --transform 1 --position -1200 --position-y -840   upright tablet
+moreland --transform 1 --print-rule  the matching `hyprland.conf` line
 ```
+
+## Rotated output (vertical layout)
+
+A tablet panel is native landscape even when the tablet stands upright, so the
+compositor is asked for the panel's normal mode and rotates it. The rotation
+happens in the compositor from the captured framebuffer, not by scaling the
+image, so a rotated stream is as sharp as an unrotated one.
+
+`--transform` takes Hyprland's ids, 0-7; odd ids are quarter turns and swap the
+logical width and height. Anything else is rejected with a warning and falls
+back to 0 rather than being handed to the compositor.
+
+Position is in the **post-rotation** layout. A `1920x1200` panel at transform 1
+becomes a `1200x1920` output, so to sit left of a 1080-tall primary with the
+bottom edges flush:
+
+```
+x = -1200                  one output width to the left
+y = 1080 - 1920 = -840     primary height minus this output's height
+```
+
+`--max-width` still caps the panel's long edge, which stays the width of the
+compositor mode even when the output is turned. Rotation therefore does not
+change how many pixels are streamed, only which way they face; use `--width`
+and `--height` if you want a specific stream size.
+
+The daemon issues the rule on every connect. A static `monitor=` line in
+`hyprland.conf` is only the fallback for `hyprctl reload`, which reapplies the
+config file and would otherwise reset the output to landscape. Generate that
+line instead of hand-writing it, so the two cannot drift:
+
+```
+moreland --transform 1 --position -1200 --position-y -840 --print-rule
+```
+
+`--print-rule` prints the `monitor=` line and the equivalent `wlr-randr`
+command, without touching the running compositor. Both it and the rule the
+daemon sends come from `display.rs`, which is the single place geometry is
+rendered into a compositor dialect.
+
+On labwc, where the output belongs to the session, only the rotation is applied
+(`wlr-randr --output <name> --transform <value>`); mode and position stay as you
+configured them, for the reason given in `COMPATIBILITY.md`.
+
+Verified on the reference machine: `1920x1200@90` at `-1200x-840` with
+transform 1, surviving both a daemon restart and `hyprctl reload`, with `grim -o
+moreland` producing a `1200x1920` capture.
 
 ## Code
 
 ```
 crates/daemon/
   src/main.rs         daemon loop, CLI, signal handling
+  src/display.rs      geometry -> Hyprland rule / Lua / wlr-randr
   src/tracker.rs      ADB host:track-devices client
   src/session.rs      one streaming session, RAII-scoped
   src/output.rs       virtual output guard, per-compositor

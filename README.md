@@ -151,8 +151,9 @@ moreland --seconds 15     stop after 15 s and print latency statistics
                            required on labwc, which cannot create one and
                            must be pointed at an existing headless output
 --print-rule               print the compositor configuration for the current
-                           options, including the `monitor=` line for
-                           hyprland.conf, then exit
+                           options, then exit: the `monitor=` line for
+                           hyprland.conf and the `hl.monitor` call for
+                           hyprland.lua
 --show-cursor              composite the mouse cursor into the stream
 ```
 
@@ -296,7 +297,8 @@ no-ops. Use `hyprctl eval 'hl.exec_cmd("...")'` or
 A static `hl.monitor{}` rule for the output is still worth keeping. Runtime
 rules are discarded on config reload, and with no static entry the output falls
 back to `auto` scale mid-session. A rule for an absent output is simply stored,
-so it is harmless while the tablet is unplugged.
+so it is harmless while the tablet is unplugged. `moreland --print-rule` prints
+one for your current options, alongside the `monitor=` line for `hyprland.conf`.
 
 ## Known limitations
 

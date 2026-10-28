@@ -48,11 +48,12 @@ The `transform` field is not optional in practice: a rule that omits it means
 transform 0, so the output would snap back to landscape every time it connects.
 
 Hyprland 0.56.2 with a classic `hyprland.conf` applies `hyprctl keyword monitor`
-directly, and that is the path verified here. A compositor started with the
-non-legacy (Lua) parser answers `keyword can't work with non-legacy parsers. Use
-eval.` on stdout with a zero exit status; the daemon checks for that reply and
-re-issues the same rule through `hyprctl eval`. That path is implemented but not
-exercised on this machine.
+directly. A compositor started with the non-legacy (Lua) parser answers
+`keyword can't work with non-legacy parsers. Use eval.` on stdout with a zero
+exit status; the daemon checks for that reply and re-issues the same rule
+through `hyprctl eval`. Both paths are verified on Hyprland 0.56.2: with the Lua
+parser, `--transform 1` produced a `1200x1920` `grim` capture and
+`--transform 0` brought the output back to landscape.
 
 Hyprland accepts an **explicit name**, which makes the result deterministic.
 That matters more than it sounds: the unnamed form allocates `HEADLESS-N` from
@@ -122,8 +123,10 @@ Consequences worth knowing:
 - **Rotation is the exception.** `--transform` is applied with
   `wlr-randr --output HEADLESS-1 --transform <value>`, because rotation is a
   property of the image the tablet receives rather than of your layout. It is
-  applied when the session starts and left in place afterwards, like the
-  output itself. Untested by the maintainer.
+  set on every session start, transform 0 included, and left in place
+  afterwards like the output itself. So `--transform 0` restores `normal`
+  after an earlier rotated run; nothing else would, since the daemon never
+  removes the output. Untested by the maintainer.
 - **`wlr-randr` is a runtime dependency** on this compositor, and doubles as
   the round-trip that confirms labwc is really the running session.
 

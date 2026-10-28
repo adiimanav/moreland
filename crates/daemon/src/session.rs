@@ -67,6 +67,23 @@ impl Default for Config {
     }
 }
 
+impl Config {
+    /// The output geometry for a session streaming at `mode`.
+    ///
+    /// Shared by the session and `--print-rule`, so the rule printed for the
+    /// config file is built exactly like the one issued on connect.
+    pub fn layout(&self, mode: (u32, u32)) -> Layout {
+        Layout {
+            name: self.output_name.clone(),
+            mode,
+            refresh: self.fps,
+            position: (self.position_x, self.position_y),
+            scale: 1.0,
+            transform: self.transform,
+        }
+    }
+}
+
 pub fn app_installed(serial: &str) -> Result<bool> {
     let out = adb::shell(serial, &format!("pm list packages {APP_PACKAGE}"))?;
     Ok(out.contains(APP_PACKAGE))
@@ -103,14 +120,7 @@ pub fn run(serial: &str, config: &Config, shutdown: &AtomicBool) -> Result<()> {
         }
     };
 
-    let layout = Layout {
-        name: config.output_name.clone(),
-        mode: (width, height),
-        refresh: config.fps,
-        position: (config.position_x, config.position_y),
-        scale: 1.0,
-        transform: config.transform,
-    };
+    let layout = config.layout((width, height));
 
     let output = VirtualOutput::create(&layout)?;
     if output.applied_mode() {

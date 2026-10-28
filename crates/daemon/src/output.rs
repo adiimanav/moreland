@@ -296,19 +296,16 @@ impl VirtualOutput {
                 }
                 // Mode and position stay the user's; rotation is the one
                 // property `--transform` promises, so honour it here too.
-                if layout.transform != 0 {
-                    let rotation = layout.wlr_randr_transform().with_context(|| {
-                        format!(
-                            "transform {} is not a rotation wlr-randr knows",
-                            layout.transform
-                        )
-                    })?;
-                    run(
-                        "wlr-randr",
-                        &["--output", name.as_str(), "--transform", rotation],
+                // Always, 0 included: the output outlives the session and
+                // Drop leaves it alone, so this call is the only thing that
+                // can undo a rotation an earlier run left behind.
+                let args = layout.wlr_randr_args().with_context(|| {
+                    format!(
+                        "transform {} is not a rotation wlr-randr knows",
+                        layout.transform
                     )
-                    .with_context(|| format!("rotating labwc output {name}"))?;
-                }
+                })?;
+                run("wlr-randr", &args).with_context(|| format!("rotating labwc output {name}"))?;
                 return Ok(Self {
                     compositor,
                     name: name.to_string(),

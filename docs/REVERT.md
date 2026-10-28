@@ -46,7 +46,19 @@ Both commands affect only the running compositor. Neither was written to
 `~/.config/hypr/hyprland.conf`, so a Hyprland restart also clears them.
 
 **If you added a `monitor=` line to `hyprland.conf` yourself**, remove it
-manually — this project did not put it there.
+manually — this project did not put it there. The same applies to an
+`hl.monitor` call in `hyprland.lua`.
+
+**If you used `--transform` on Hyprland's Lua parser**, check the rotation
+before going back to a build without `--transform` support. That parser keeps
+an output's transform when a later `hl.monitor` rule omits it, so an older
+daemon leaves `moreland` rotated, even across the output being removed and
+recreated (observed on Hyprland 0.56.2). Reset it explicitly, adjusting mode and
+position to your layout:
+
+```bash
+hyprctl eval 'hl.monitor({ output = "moreland", mode = "1920x1200@60", position = "0x1080", scale = 1, transform = 0 })'
+```
 
 The same goes for a `moreland.service.d/` drop-in holding your layout: the
 installer only writes the main unit, so a drop-in is yours to keep or delete.

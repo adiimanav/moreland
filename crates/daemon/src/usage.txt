@@ -27,8 +27,9 @@ OPTIONS
                         required on labwc, which cannot create one and must
                         be pointed at an existing headless output
     --print-rule        print the compositor configuration for the current
-                        options, including the `monitor=` line for
-                        hyprland.conf, then exit
+                        options, then exit: the `monitor=` line for
+                        hyprland.conf and the `hl.monitor` call for
+                        hyprland.lua
     --show-cursor       composite the mouse cursor into the stream
 
     --once              stream one session, then exit

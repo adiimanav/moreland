@@ -52,6 +52,11 @@ pub struct CaptureConfig {
     /// compressed surfaces. The result is not an error but a silent fallback to
     /// a CPU copy, which defeats the entire point of the DMA-BUF path.
     pub allowed_modifiers: Vec<u64>,
+    /// Exact `(fourcc, modifier)` pairs the consumer can import zero-copy, in
+    /// preference order. Tried before the XR24/AR24 fallback, so a consumer that
+    /// only imports e.g. a tiled AR24 gets that rather than a linear XR24 it
+    /// would have to read through the CPU. Empty means no preference.
+    pub allowed_formats: Vec<(u32, u64)>,
     /// Ask the compositor to composite the mouse cursor into captured frames.
     pub paint_cursor: bool,
 }
@@ -62,6 +67,7 @@ impl Default for CaptureConfig {
             mode: BufferMode::Dmabuf,
             pool_size: 2,
             allowed_modifiers: Vec::new(),
+            allowed_formats: Vec::new(),
             paint_cursor: false,
         }
     }
@@ -318,6 +324,7 @@ pub struct Capture {
     // buffer constraints mid-session.
     pool_size: usize,
     allowed_modifiers: Vec<u64>,
+    allowed_formats: Vec<(u32, u64)>,
     geometry_changed: bool,
     shm: wl_shm::WlShm,
     dmabuf: Option<ZwpLinuxDmabufV1>,
@@ -415,6 +422,7 @@ impl Capture {
             device_path: None,
             pool_size,
             allowed_modifiers: config.allowed_modifiers.clone(),
+            allowed_formats: config.allowed_formats.clone(),
             geometry_changed: false,
             shm,
             dmabuf: dmabuf_global,
@@ -471,7 +479,11 @@ impl Capture {
                     .as_ref()
                     .context("DMA-BUF mode without a linux-dmabuf global")?;
                 let (fourcc, modifiers) =
-                    pick_dmabuf_format(&caps.dmabuf_formats, &self.allowed_modifiers)?;
+                    pick_dmabuf_format(
+                        &caps.dmabuf_formats,
+                        &self.allowed_modifiers,
+                        &self.allowed_formats,
+                    )?;
                 format = fourcc;
 
                 let dev = caps
@@ -535,26 +547,30 @@ impl Capture {
     /// it again is what synchronises us with the new generation.
     fn renegotiate(&mut self) -> Result<()> {
         let (old_width, old_height) = (self.width, self.height);
+        let (old_format, old_modifier) = (self.format, self.modifier);
         let deadline = Instant::now() + Duration::from_secs(5);
         while !self.state.session_done {
             if self.state.session_stopped {
                 bail!("capture session stopped during renegotiation");
             }
-            if Instant::now() > deadline {
+            if Instant::now() >= deadline {
                 bail!("timed out waiting for new buffer constraints");
             }
-            self.queue.blocking_dispatch(&mut self.state)?;
+            dispatch_until(&mut self.queue, &mut self.state, deadline)?;
         }
         self.allocate_pool()?;
 
-        // A format or modifier change is absorbed here — that is the common
-        // case, raised by things like a wallpaper daemon claiming the output.
+        // Reallocating with the *same* format and modifier is absorbed here —
+        // that is the common case, raised by things like a wallpaper daemon
+        // claiming the output.
         //
-        // A *geometry* change cannot be: the encoder and the device's decoder
-        // were both configured for the old dimensions, and neither is told
-        // about this. Silently continuing produces exactly the failure this
-        // was written to fix — frames captured but nothing rendered. Report it
-        // so the caller rebuilds the whole pipeline.
+        // Anything else cannot be. The encoder's caps pin the fourcc and
+        // modifier it was built with, and the encoder and the device's
+        // decoder were both configured for the old dimensions; none of them
+        // is told about this. Silently continuing feeds buffers in one layout
+        // to a consumer reading another — garbage, or `not-negotiated` — or,
+        // for geometry, frames captured but nothing rendered. Report it so the
+        // caller rebuilds the whole pipeline.
         if (self.width, self.height) != (old_width, old_height) {
             self.geometry_changed = true;
             bail!(
@@ -563,6 +579,16 @@ impl Capture {
                 old_height,
                 self.width,
                 self.height
+            );
+        }
+        if (self.format, self.modifier) != (old_format, old_modifier) {
+            bail!(
+                "capture format changed {} modifier {:?} -> {} modifier {:?}; \
+                 pipeline must restart",
+                fourcc_name(old_format),
+                old_modifier.map(|m| format!("0x{m:016x}")),
+                fourcc_name(self.format),
+                self.modifier.map(|m| format!("0x{m:016x}")),
             );
         }
 
@@ -691,6 +717,54 @@ impl Drop for Capture {
     }
 }
 
+/// Dispatch what arrives before `deadline`, waiting no longer than that.
+///
+/// `blocking_dispatch` waits for events with no bound at all, so a deadline
+/// checked between calls never fires when the compositor goes quiet — the
+/// very case a deadline exists for. This does the same read, but polls the
+/// connection with the time remaining first.
+fn dispatch_until(
+    queue: &mut EventQueue<State>,
+    state: &mut State,
+    deadline: Instant,
+) -> Result<()> {
+    if queue.dispatch_pending(state)? > 0 {
+        return Ok(());
+    }
+    queue.flush().context("flushing Wayland requests")?;
+    let Some(guard) = queue.prepare_read() else {
+        // Events were queued in the meantime; nothing to wait for.
+        queue.dispatch_pending(state)?;
+        return Ok(());
+    };
+
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let timeout =
+        rustix::event::Timespec::try_from(remaining).context("converting the dispatch timeout")?;
+    let ready = {
+        let mut fds = [rustix::event::PollFd::from_borrowed_fd(
+            guard.connection_fd(),
+            rustix::event::PollFlags::IN,
+        )];
+        match rustix::event::poll(&mut fds, Some(&timeout)) {
+            Ok(n) => n > 0,
+            Err(rustix::io::Errno::INTR) => false,
+            Err(e) => return Err(e).context("polling the Wayland connection"),
+        }
+    };
+    if ready {
+        match guard.read() {
+            Ok(_) => {}
+            Err(wayland_client::backend::WaylandError::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e).context("reading Wayland events"),
+        }
+    }
+    // Not ready: dropping the guard cancels the read.
+    queue.dispatch_pending(state)?;
+    Ok(())
+}
+
 fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
     for wanted in [wl_shm::Format::Xrgb8888, wl_shm::Format::Argb8888] {
         if formats.contains(&wanted) {
@@ -709,9 +783,19 @@ fn pick_shm_format(formats: &[wl_shm::Format]) -> Result<wl_shm::Format> {
 fn pick_dmabuf_format(
     formats: &[(u32, Vec<u64>)],
     allowed: &[u64],
+    allowed_formats: &[(u32, u64)],
 ) -> Result<(u32, Vec<u64>)> {
     const XR24: u32 = fourcc(b"XR24");
     const AR24: u32 = fourcc(b"AR24");
+
+    for (fourcc, modifier) in allowed_formats {
+        if formats
+            .iter()
+            .any(|(f, offered)| f == fourcc && offered.contains(modifier))
+        {
+            return Ok((*fourcc, vec![*modifier]));
+        }
+    }
 
     for wanted in [XR24, AR24] {
         let Some((fourcc, offered)) = formats.iter().find(|(f, _)| *f == wanted) else {
@@ -738,7 +822,7 @@ fn pick_dmabuf_format(
     )
 }
 
-fn fourcc_name(code: u32) -> String {
+pub fn fourcc_name(code: u32) -> String {
     let bytes = code.to_le_bytes();
     if bytes.iter().all(|b| b.is_ascii_graphic()) {
         String::from_utf8_lossy(&bytes).into_owned()
@@ -749,4 +833,30 @@ fn fourcc_name(code: u32) -> String {
 
 const fn fourcc(code: &[u8; 4]) -> u32 {
     u32::from_le_bytes(*code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_until_returns_at_the_deadline_when_the_compositor_is_silent() {
+        let (client, _silent_compositor) = std::os::unix::net::UnixStream::pair().unwrap();
+        let conn = Connection::from_socket(client).unwrap();
+        let mut queue = conn.new_event_queue::<State>();
+        let mut state = State::default();
+
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(100);
+        dispatch_until(&mut queue, &mut state, deadline).unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(90),
+            "returned early: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "overshot the deadline: {waited:?}"
+        );
+    }
 }

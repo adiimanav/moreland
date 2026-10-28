@@ -86,6 +86,7 @@ fn main() -> Result<()> {
         } else {
             FALLBACK_MODIFIERS.to_vec()
         },
+        allowed_formats: Vec::new(),
         paint_cursor: false,
     };
     let mut capture = Capture::new(&target, &config)?;

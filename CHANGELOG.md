@@ -5,7 +5,7 @@ All notable changes to moreland are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, a minor bump may change
 defaults or flags.
 
-## [0.2.0] - Unreleased
+## [0.2.0] - 28/10/2026
 
 The daemon and the Android app still speak the same wire protocol as 0.1.0,
 so either side can be upgraded on its own.

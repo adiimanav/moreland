@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit
  * swapped as the view's surface comes and goes, rather than a constructor
  * argument that would tie the stream's lifetime to the surface's.
  */
-class VideoStream {
+class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
 
     private companion object {
         const val TAG = "Moreland"
@@ -141,6 +141,7 @@ class VideoStream {
 
         val header = Protocol.readStreamHeader(input)
         Log.i(TAG, "stream ${header.width}x${header.height}@${header.framerate} ${header.mime}")
+        onStreamShape(header.height > header.width)
 
         val target = awaitSurface()
         freeInputs.clear()

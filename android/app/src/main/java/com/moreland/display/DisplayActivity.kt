@@ -3,6 +3,7 @@
 package com.moreland.display
 
 import android.app.Activity
+import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.os.Bundle
 import android.view.SurfaceHolder
@@ -46,9 +47,26 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
         root.addView(status, FrameLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)
 
-        stream = VideoStream().also { it.start() }
+        stream = VideoStream(::followStreamShape).also { it.start() }
         surfaceView.holder.addCallback(this)
         goImmersive()
+    }
+
+    /**
+     * Turn the window to match the stream, or the surface stretches it to fit.
+     *
+     * Hyprland 0.57 hands a rotated output to capture already upright, so
+     * `--transform 1` arrives as a 1200x1920 stream. Older versions send the
+     * landscape frame, which never reaches the portrait branch. The sensor
+     * decides which way up, so portrait holds whichever way the tablet is
+     * stood, even with auto-rotate locked.
+     */
+    private fun followStreamShape(portrait: Boolean) = runOnUiThread {
+        requestedOrientation = if (portrait) {
+            ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        } else {
+            ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
+        }
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

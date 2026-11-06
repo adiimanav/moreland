@@ -494,9 +494,26 @@ impl VirtualOutput {
                 }
             },
         };
-        let target = format!("output.{connector}.position.{x},{y}");
-        if let Err(e) = run("kscreen-doctor", &[&target]) {
-            tracing::warn!("could not position the output ({target}): {e:#}");
+        // KWin refuses a negative position, so a spot left of or above the
+        // other screens moves them the other way instead, in the same request.
+        let others = if x < 0 || y < 0 {
+            kwin_positions(&connector).unwrap_or_else(|e| {
+                tracing::warn!("could not read the other screens' positions ({e:#})");
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+        let request = kwin_layout_request((&connector, x, y), &others);
+        if request.len() > 1 {
+            tracing::info!("shifting the other screens to make room at ({x}, {y})");
+        }
+        let args: Vec<String> = request
+            .iter()
+            .map(|(name, x, y)| format!("output.{name}.position.{x},{y}"))
+            .collect();
+        if let Err(e) = kscreen_apply(&args) {
+            tracing::warn!("could not position the output: {e:#}");
         }
 
         if refresh != 60 {
@@ -658,6 +675,71 @@ fn set_kwin_refresh(connector: &str, width: u32, height: u32, refresh: u32) -> R
     Ok(())
 }
 
+/// Every position to request so that `ours` lands where asked, ours first.
+///
+/// KWin's layout starts at 0,0 and refuses a negative position outright, so a
+/// spot left of or above everything is reached by moving everything else right
+/// or down by the same amount. A spot already in range asks for nothing else.
+#[cfg_attr(not(feature = "plasma"), allow(dead_code))]
+fn kwin_layout_request(
+    ours: (&str, i32, i32),
+    others: &[(String, i32, i32)],
+) -> Vec<(String, i32, i32)> {
+    let (name, x, y) = ours;
+    let (dx, dy) = ((-x).max(0), (-y).max(0));
+    let mut request = vec![(name.to_string(), x + dx, y + dy)];
+    if dx > 0 || dy > 0 {
+        request.extend(
+            others
+                .iter()
+                .map(|(other, ox, oy)| (other.clone(), ox + dx, oy + dy)),
+        );
+    }
+    request
+}
+
+/// Name and position of every enabled screen except `except`.
+#[cfg(feature = "plasma")]
+fn kwin_positions(except: &str) -> Result<Vec<(String, i32, i32)>> {
+    let json = run("kscreen-doctor", &["-j"]).context("reading the KWin output list")?;
+    let doc: serde_json::Value = serde_json::from_str(&json).context("parsing kscreen JSON")?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .context("kscreen JSON has no outputs")?;
+    let int = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_i64()).map(|v| v as i32);
+    Ok(outputs
+        .iter()
+        .filter(|o| o.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+        .filter_map(|o| {
+            let name = o.get("name").and_then(|n| n.as_str())?;
+            let pos = o.get("pos");
+            (name != except).then(|| {
+                (
+                    name.to_string(),
+                    int(pos.and_then(|p| p.get("x"))).unwrap_or(0),
+                    int(pos.and_then(|p| p.get("y"))).unwrap_or(0),
+                )
+            })
+        })
+        .collect())
+}
+
+/// Apply a `kscreen-doctor` request, treating a rejected one as an error.
+///
+/// kscreen-doctor reports a configuration KWin refused ("applying config
+/// failed! ...") on stdout and still exits 0, so the exit status alone would
+/// report success for a request that changed nothing.
+#[cfg(feature = "plasma")]
+fn kscreen_apply(args: &[String]) -> Result<()> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run("kscreen-doctor", &args)?;
+    if let Some(line) = out.lines().find(|line| line.contains("failed")) {
+        bail!("kscreen-doctor {}: {}", args.join(" "), line.trim());
+    }
+    Ok(())
+}
+
 /// Position and logical size `(x, y, width, height)` of the main screen: the
 /// enabled output with the best (lowest) priority, ignoring `except`.
 #[cfg(feature = "plasma")]
@@ -706,6 +788,42 @@ fn kwin_primary_geometry(except: &str) -> Result<(i32, i32, i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn others() -> Vec<(String, i32, i32)> {
+        vec![("eDP-1".to_string(), 0, 0)]
+    }
+
+    #[test]
+    fn a_spot_in_range_moves_nothing_else() {
+        assert_eq!(
+            kwin_layout_request(("Virtual-moreland", 1746, 0), &others()),
+            vec![("Virtual-moreland".to_string(), 1746, 0)]
+        );
+    }
+
+    #[test]
+    fn left_of_everything_moves_everything_else_right() {
+        // What `--side left` asks for beside a laptop at 0,0; KWin refuses the
+        // -1920 itself, so the laptop moves over instead.
+        assert_eq!(
+            kwin_layout_request(("Virtual-moreland", -1920, 0), &others()),
+            vec![
+                ("Virtual-moreland".to_string(), 0, 0),
+                ("eDP-1".to_string(), 1920, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn above_everything_moves_everything_else_down() {
+        assert_eq!(
+            kwin_layout_request(("Virtual-moreland", 0, -1200), &others()),
+            vec![
+                ("Virtual-moreland".to_string(), 0, 0),
+                ("eDP-1".to_string(), 0, 1200),
+            ]
+        );
+    }
 
     const LAPTOP: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
     const TABLET: (i32, i32) = (2560, 1600);

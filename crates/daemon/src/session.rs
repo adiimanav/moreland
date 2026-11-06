@@ -318,7 +318,7 @@ impl PlasmaPipeline {
         let node = output
             .pipewire_node()
             .context("the KDE output has no PipeWire node")?;
-        let capture = PwCapture::start(node)?;
+        let capture = PwCapture::start(node, output.pipewire_size())?;
 
         // The encoder needs the real frame size and pixel format, which only
         // the stream knows, so wait for it to say.
@@ -347,6 +347,7 @@ impl PlasmaPipeline {
 
         let name = format!("{:?}", format.format);
         let name = name.trim_start_matches("VideoFormat::");
+        tracing::info!("KDE stream {}x{} {name}", format.width, format.height);
         let mut encoder_config =
             MemoryEncoderConfig::new(backend, format.width, format.height, config.fps);
         if let Some(bitrate) = config.bitrate_kbps {

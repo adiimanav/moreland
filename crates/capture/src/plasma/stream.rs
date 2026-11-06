@@ -82,7 +82,11 @@ pub struct PwCapture {
 
 impl PwCapture {
     /// Connect to `node_id` and start delivering frames.
-    pub fn start(node_id: u32) -> Result<Self> {
+    ///
+    /// `size` is the frame size to ask for, normally the output's own. KWin
+    /// honours the consumer's preferred size by scaling the output into it, so
+    /// asking for anything else letterboxes or squeezes the picture.
+    pub fn start(node_id: u32, size: Option<(u32, u32)>) -> Result<Self> {
         let (tx, events) = sync_channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
         let paused_since = Arc::new(Mutex::new(None));
@@ -98,6 +102,7 @@ impl PwCapture {
             .spawn(move || {
                 if let Err(e) = run(
                     node_id,
+                    size,
                     tx.clone(),
                     quit_rx,
                     &ready_tx,
@@ -169,6 +174,7 @@ impl Drop for PwCapture {
 
 fn run(
     node_id: u32,
+    size: Option<(u32, u32)>,
     events: SyncSender<Event>,
     quit_rx: pw::channel::Receiver<()>,
     ready: &SyncSender<Result<(), String>>,
@@ -299,7 +305,7 @@ fn run(
         .register()
         .context("registering the stream listener")?;
 
-    let values = format_offer().context("building the format offer")?;
+    let values = format_offer(size).context("building the format offer")?;
     let mut params = [Pod::from_bytes(&values).context("format offer is not a valid pod")?];
 
     stream
@@ -318,8 +324,12 @@ fn run(
 
 /// What we accept. No modifier is offered, which is what steers the producer
 /// to plain memory buffers instead of DMA-BUFs.
-fn format_offer() -> Result<Vec<u8>> {
+///
+/// `size` is the preferred frame size; without one, 1920x1200.
+fn format_offer(size: Option<(u32, u32)>) -> Result<Vec<u8>> {
     use spa::param::video::VideoFormat;
+
+    let (width, height) = size.unwrap_or((1920, 1200));
 
     let object = spa::pod::object!(
         spa::utils::SpaTypes::ObjectParamFormat,
@@ -350,10 +360,7 @@ fn format_offer() -> Result<Vec<u8>> {
             Choice,
             Range,
             Rectangle,
-            spa::utils::Rectangle {
-                width: 1920,
-                height: 1200
-            },
+            spa::utils::Rectangle { width, height },
             spa::utils::Rectangle {
                 width: 1,
                 height: 1

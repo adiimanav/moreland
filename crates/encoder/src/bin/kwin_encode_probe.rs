@@ -49,7 +49,7 @@ fn main() -> Result<()> {
         1.0,
         CursorMode::Embedded,
     )?;
-    let capture = PwCapture::start(output.node_id())?;
+    let capture = PwCapture::start(output.node_id(), output.size())?;
     println!("backend {}, writing {out_path}", backend.name());
 
     let mut file = std::fs::File::create(&out_path).context("creating the output file")?;

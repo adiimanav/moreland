@@ -535,6 +535,12 @@ impl VirtualOutput {
         self.plasma.as_ref().map(|p| p.node_id())
     }
 
+    /// The KDE output's own size, which its stream should be asked for.
+    #[cfg(feature = "plasma")]
+    pub fn pipewire_size(&self) -> Option<(u32, u32)> {
+        self.plasma.as_ref().and_then(|p| p.size())
+    }
+
     /// Service the compositor connection. Returns false once the compositor
     /// has removed the output from its side. A no-op everywhere but KDE.
     #[cfg(feature = "plasma")]

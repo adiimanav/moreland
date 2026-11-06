@@ -57,7 +57,7 @@ fn main() -> Result<()> {
     };
     println!("pipewire node {}", output.node_id());
 
-    let capture = PwCapture::start(output.node_id())?;
+    let capture = PwCapture::start(output.node_id(), output.size())?;
 
     let started = Instant::now();
     let deadline = started + Duration::from_secs(seconds);

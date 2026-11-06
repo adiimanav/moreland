@@ -186,9 +186,12 @@ X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
 A per-user desktop entry under `~/.local/share/applications` is sufficient;
 no root access is required. KWin matches the client's executable path rather
 than how it was launched. `Exec` must be an absolute path — the bare
-form is silently denied. `install.sh` writes this entry **only on a Plasma
-session**, so a Hyprland install is not littered with it; force it with
-`MORELAND_INSTALL_DESKTOP_ENTRY=1`. The mechanics and the traps are in
+form is silently denied. `install.sh` writes this entry **whenever it builds
+the KDE backend**, which it does whenever libpipewire, plasma-wayland-protocols
+and clang are installed, from any session. So installing from Hyprland still
+sets up a Plasma second session, and an install without the KDE backend is not
+littered with the entry. Force it with `MORELAND_INSTALL_DESKTOP_ENTRY=1`, or
+choose the backend with `MORELAND_PLASMA=1` or `0`. The mechanics and the traps are in
 [06-plasma-backend.md](06-plasma-backend.md).
 
 Note that the portal is *not* the answer here: it appears unable to create

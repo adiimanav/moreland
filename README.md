@@ -57,7 +57,9 @@ to have it silently not hold. See [Multi-GPU hosts](#multi-gpu-hosts).
 **Host**
 
 - Hyprland, labwc with `wlr-randr`, or KDE Plasma built with
-  `--features plasma` (see [Compatibility](#compatibility) for others)
+  `--features plasma`, which `install.sh` does whenever libpipewire,
+  plasma-wayland-protocols and clang are installed (see
+  [Compatibility](#compatibility) for others)
 - A GPU with VA-API encode - AMD, Intel, or NVIDIA via `nvidia-vaapi-driver`.
   On KDE, an NVIDIA GPU with NVENC (`nvh264enc`) or the CPU (`x264enc`) works
   instead

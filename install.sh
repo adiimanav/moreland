@@ -15,12 +15,41 @@ warn() { printf '\033[1;33m warn\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror\033[0m %s\n' "$*" >&2; exit 1; }
 
 say "Building the daemon"
-# KDE Plasma needs the PipeWire/KDE backend, which pulls in libpipewire and the
-# plasma-wayland-protocols XML at build time; other compositors must not.
+# The KDE Plasma backend needs libpipewire, the plasma-wayland-protocols XML
+# and clang (for the PipeWire bindings) at build time. Build it whenever they
+# are present, not only from a Plasma session: a Plasma-enabled daemon still
+# drives Hyprland and labwc, so one install serves every desktop the user logs
+# into. Installed from Hyprland without it, the service fails on Plasma.
+# MORELAND_PLASMA=1 or 0 overrides the guess.
+have_plasma_deps() {
+    pkg-config --exists libpipewire-0.3 2>/dev/null || return 1
+    command -v clang >/dev/null || return 1
+    # The same places crates/capture/build.rs looks.
+    if [[ -n ${MORELAND_ZKDE_SCREENCAST_XML:-} ]]; then
+        [[ -f $MORELAND_ZKDE_SCREENCAST_XML ]]
+        return
+    fi
+    local dirs="${XDG_DATA_DIRS:-}" root
+    for root in ${dirs//:/ } /usr/share /usr/local/share /run/current-system/sw/share; do
+        [[ -f $root/plasma-wayland-protocols/zkde-screencast-unstable-v1.xml ]] && return 0
+    done
+    return 1
+}
 FEATURES=""
-case "${XDG_CURRENT_DESKTOP:-}" in
-    *KDE*) FEATURES="--features plasma" ;;
+case "${MORELAND_PLASMA:-auto}" in
+    1) FEATURES="--features plasma" ;;
+    0) ;;
+    *)
+        if have_plasma_deps; then
+            FEATURES="--features plasma"
+        elif [[ ${XDG_CURRENT_DESKTOP:-} == *KDE* ]]; then
+            die "the KDE Plasma backend needs libpipewire, plasma-wayland-protocols and clang to build; install them (Arch: pacman -S pipewire plasma-wayland-protocols clang) and re-run, or set MORELAND_PLASMA=0"
+        fi
+        ;;
 esac
+if [[ -n $FEATURES ]]; then
+    say "Including the KDE Plasma backend"
+fi
 # shellcheck disable=SC2086
 cargo build --release --manifest-path "$REPO/Cargo.toml" $FEATURES
 
@@ -36,17 +65,14 @@ systemctl --user daemon-reload
 
 # The desktop entry exists for exactly one reason: KWin only advertises
 # zkde_screencast_unstable_v1 to a client that declares it. It does nothing on
-# Hyprland, Sway or GNOME, so it is installed only on Plasma rather than left
-# sitting in a Hyprland user's application directory.
+# Hyprland, Sway or GNOME, so it goes with the KDE backend: installed whenever
+# that is built in, which covers installing from Hyprland for a Plasma second
+# session, and left out of an install that could not use it anyway.
 #
-# Set MORELAND_INSTALL_DESKTOP_ENTRY=1 to install it anyway, for someone who
-# installs from a TTY or uses Plasma as a second session.
+# Set MORELAND_INSTALL_DESKTOP_ENTRY=1 to install it regardless.
 wants_desktop_entry() {
     [ "${MORELAND_INSTALL_DESKTOP_ENTRY:-0}" = "1" ] && return 0
-    case "${XDG_CURRENT_DESKTOP:-}" in
-        *KDE*) return 0 ;;
-    esac
-    return 1
+    [[ -n $FEATURES ]]
 }
 
 if wants_desktop_entry; then
@@ -65,7 +91,7 @@ if wants_desktop_entry; then
         warn "Could not install the desktop entry"
     fi
 else
-    say "Not a Plasma session: skipping the KDE desktop entry"
+    say "No KDE backend in this build: skipping the KDE desktop entry"
     # Deliberately not removed. Someone who uses both Plasma and Hyprland
     # would lose the grant they still need in the other session.
     if [ -f "$APP_DIR/moreland.desktop" ]; then

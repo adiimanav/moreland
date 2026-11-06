@@ -309,11 +309,10 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
         // reading from that moment. This is the only honest "displayed" time:
         // releasing the buffer merely schedules it for the next refresh.
         codec.setOnFrameRenderedListener({ _, ptsUs, renderedNs ->
-            // `renderedNs` is on a clock of its own: differences between frames
-            // are meaningful, but it cannot be compared with System.nanoTime().
-            // The callback runs just after the frame is shown, so the time
-            // measured here stands in for it on the clock the stamps use.
-            val callbackNs = System.nanoTime()
+            // `renderedNs` is when the frame reached the screen, on the
+            // System.nanoTime() clock the stamps use. The callback itself comes
+            // later, batched: about 21 ms after the frame on the Pad 6 at
+            // 120 fps, so timing the callback overstates the wait by that much.
             val stamp = stamps.remove(ptsUs) ?: return@setOnFrameRenderedListener
             val previous = lastRenderedNs
             lastRenderedNs = renderedNs
@@ -322,7 +321,7 @@ class VideoStream(private val onStreamShape: (portrait: Boolean) -> Unit) {
                     ptsUs = ptsUs,
                     queueWaitUs = (stamp.queuedNs - stamp.receivedNs) / 1000,
                     decodeUs = (stamp.readyNs - stamp.queuedNs) / 1000,
-                    displayWaitUs = (callbackNs - stamp.readyNs) / 1000,
+                    displayWaitUs = ((renderedNs - stamp.readyNs) / 1000).coerceAtLeast(0),
                     renderIntervalUs = if (previous == 0L) 0 else (renderedNs - previous) / 1000,
                 )
             )

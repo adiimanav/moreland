@@ -293,6 +293,12 @@ impl Pipeline for ExtPipeline {
 }
 
 /// KWin's PipeWire stream into a system-memory encoder (NVENC, else x264).
+/// How long KWin may hold the stream paused before the session is given up.
+/// Long enough to ride out a renegotiation, short enough that a dead stream
+/// reads as a brief blank rather than a frozen tablet.
+#[cfg(feature = "plasma")]
+const STREAM_LOST_AFTER: Duration = Duration::from_secs(2);
+
 #[cfg(feature = "plasma")]
 struct PlasmaPipeline {
     capture: capture::plasma::stream::PwCapture,
@@ -381,6 +387,15 @@ impl Pipeline for PlasmaPipeline {
 
         if !output.poll()? {
             bail!("KWin removed the virtual output");
+        }
+        if let Some(paused) = self.capture.paused_for() {
+            if paused >= STREAM_LOST_AFTER {
+                bail!(
+                    "KWin stopped streaming the output (paused {:.1} s; setting it to \
+                     mirror another screen does this); restarting",
+                    paused.as_secs_f64()
+                );
+            }
         }
         // KWin sends a frame only when the screen changes, so a quiet desktop
         // legitimately yields nothing; the short timeout just keeps the

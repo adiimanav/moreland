@@ -21,7 +21,7 @@ use pw::{properties::properties, spa};
 use spa::pod::Pod;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -67,12 +67,15 @@ struct Shared {
     started: Instant,
     /// Frames dropped because the consumer was behind.
     dropped: Arc<AtomicU64>,
+    /// When the stream left `Streaming`, while it has not come back.
+    paused_since: Arc<Mutex<Option<Instant>>>,
 }
 
 /// A running capture of one PipeWire node.
 pub struct PwCapture {
     events: Receiver<Event>,
     dropped: Arc<AtomicU64>,
+    paused_since: Arc<Mutex<Option<Instant>>>,
     quit: Option<pw::channel::Sender<()>>,
     thread: Option<JoinHandle<()>>,
 }
@@ -82,16 +85,25 @@ impl PwCapture {
     pub fn start(node_id: u32) -> Result<Self> {
         let (tx, events) = sync_channel(QUEUE_DEPTH);
         let dropped = Arc::new(AtomicU64::new(0));
+        let paused_since = Arc::new(Mutex::new(None));
         let (quit, quit_rx) = pw::channel::channel::<()>();
         // The loop reports whether it could connect at all before the caller
         // gets a handle, so a bad node id fails here rather than as silence.
         let (ready_tx, ready_rx) = sync_channel::<Result<(), String>>(1);
 
         let dropped_for_thread = Arc::clone(&dropped);
+        let paused_for_thread = Arc::clone(&paused_since);
         let thread = std::thread::Builder::new()
             .name("pipewire".into())
             .spawn(move || {
-                if let Err(e) = run(node_id, tx.clone(), quit_rx, &ready_tx, dropped_for_thread) {
+                if let Err(e) = run(
+                    node_id,
+                    tx.clone(),
+                    quit_rx,
+                    &ready_tx,
+                    dropped_for_thread,
+                    paused_for_thread,
+                ) {
                     let msg = format!("{e:#}");
                     // `ready_tx` is only read once; a late error goes on the
                     // event channel instead.
@@ -106,6 +118,7 @@ impl PwCapture {
             Ok(Ok(())) => Ok(Self {
                 events,
                 dropped,
+                paused_since,
                 quit: Some(quit),
                 thread: Some(thread),
             }),
@@ -119,6 +132,17 @@ impl PwCapture {
     /// Frames discarded because the consumer had not taken the previous ones.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// How long the stream has been out of `Streaming`, after having streamed.
+    ///
+    /// KWin pauses the stream for good when the output stops having a picture
+    /// of its own — making it a mirror of another screen does — and never
+    /// resumes it, so a pause that outlasts a renegotiation means the source
+    /// is gone. A quiet desktop is not a pause: the stream stays `Streaming`
+    /// and simply sends nothing.
+    pub fn paused_for(&self) -> Option<Duration> {
+        self.paused_since.lock().unwrap().map(|since| since.elapsed())
     }
 
     /// Wait up to `timeout` for the next event.
@@ -149,6 +173,7 @@ fn run(
     quit_rx: pw::channel::Receiver<()>,
     ready: &SyncSender<Result<(), String>>,
     dropped: Arc<AtomicU64>,
+    paused_since: Arc<Mutex<Option<Instant>>>,
 ) -> Result<()> {
     pw::init();
 
@@ -179,13 +204,26 @@ fn run(
         events,
         started: Instant::now(),
         dropped,
+        paused_since,
     };
 
     let _listener = stream
         .add_local_listener_with_user_data(shared)
-        .state_changed(|_, shared, _old, new| {
-            if let pw::stream::StreamState::Error(msg) = new {
-                let _ = shared.events.try_send(Event::Error(msg));
+        .state_changed(|_, shared, old, new| {
+            tracing::debug!("PipeWire stream {old:?} -> {new:?}");
+            match new {
+                pw::stream::StreamState::Error(msg) => {
+                    let _ = shared.events.try_send(Event::Error(msg));
+                }
+                pw::stream::StreamState::Streaming => {
+                    *shared.paused_since.lock().unwrap() = None;
+                }
+                // Shared state rather than an event: the event channel drops
+                // on overflow, and this must not be the message that is lost.
+                _ if matches!(old, pw::stream::StreamState::Streaming) => {
+                    *shared.paused_since.lock().unwrap() = Some(Instant::now());
+                }
+                _ => {}
             }
         })
         .param_changed(|_, shared, id, param| {

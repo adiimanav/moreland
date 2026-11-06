@@ -412,17 +412,25 @@ impl VirtualOutput {
                 let reply = run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
 
-                // A compositor running the non-legacy (Lua) config parser
-                // rejects `keyword` with "keyword can't work with non-legacy
-                // parsers. Use eval." on stdout, with a zero exit status, so
-                // `run` reports success and the output silently keeps the
-                // compositor's defaults. Re-issue the same rule through
-                // `eval`, which that parser accepts. The classic parser, which
-                // the reference machine runs, applies the keyword directly.
-                if reply.contains("non-legacy parsers") {
+                // hyprctl reports a refused request on stdout with a zero exit
+                // status, so `run` calls it success and the output silently
+                // keeps the compositor's defaults. The wording changes between
+                // releases: 0.56's Lua parser says "keyword can't work with
+                // non-legacy parsers. Use eval.", 0.57 says "unknown request".
+                // So anything but "ok" counts as refused, and the same rule is
+                // re-issued through `eval`, which the Lua parser accepts.
+                if reply.trim() != "ok" {
                     let lua = layout.hyprland_lua();
-                    run("hyprctl", &["eval", &lua])
+                    let eval = run("hyprctl", &["eval", &lua])
                         .with_context(|| format!("configuring output as {lua}"))?;
+                    if eval.trim() != "ok" {
+                        tracing::warn!(
+                            "Hyprland applied no monitor rule: `keyword` said {:?}, \
+                             `eval` said {:?}",
+                            reply.trim(),
+                            eval.trim()
+                        );
+                    }
                 }
 
                 restore_hyprland_monitor_state(&saved_states, name)

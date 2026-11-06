@@ -390,8 +390,7 @@ impl VirtualOutput {
             }
             #[cfg(feature = "plasma")]
             Compositor::Kwin => {
-                let (width, height) = layout.mode;
-                return Self::create_kwin(name, width, height, layout.refresh, placement, paint_cursor);
+                return Self::create_kwin(layout, placement, paint_cursor);
             }
             Compositor::Hyprland => {
                 let saved_states =
@@ -452,15 +451,25 @@ impl VirtualOutput {
     /// a single 60 Hz mode. Anything else is added afterwards as a custom mode
     /// through `kscreen-doctor` and selected.
     #[cfg(feature = "plasma")]
-    fn create_kwin(
-        name: &str,
-        width: u32,
-        height: u32,
-        refresh: u32,
-        placement: Placement,
-        paint_cursor: bool,
-    ) -> Result<Self> {
+    fn create_kwin(layout: &Layout, placement: Placement, paint_cursor: bool) -> Result<Self> {
         use capture::plasma::{CursorMode, PlasmaVirtualOutput};
+
+        let name = layout.name.as_str();
+        // KWin's screencast does not carry an output's rotation: a rotated
+        // virtual output streams a landscape buffer with the picture still
+        // upright (KWin 6.8.2). So the output is never rotated here. A quarter
+        // turn instead creates it upright at its portrait size, and the tablet
+        // app turns itself to the stream's shape, as it does for Hyprland 0.57;
+        // the tablet's sensor decides which way up.
+        if !matches!(layout.transform, 0 | 1 | 3) {
+            tracing::warn!(
+                "--transform {} on KDE: only portrait (odd) or landscape (even) is \
+                 honoured; the tablet's own rotation decides which way up",
+                layout.transform
+            );
+        }
+        let (width, height) = layout.logical_size();
+        let refresh = layout.refresh;
 
         let cursor = if paint_cursor {
             CursorMode::Embedded
@@ -508,10 +517,14 @@ impl VirtualOutput {
         if request.len() > 1 {
             tracing::info!("shifting the other screens to make room at ({x}, {y})");
         }
-        let args: Vec<String> = request
+        let mut args: Vec<String> = request
             .iter()
             .map(|(name, x, y)| format!("output.{name}.position.{x},{y}"))
             .collect();
+        // KScreen remembers a rotation per set of screens, and a rotated
+        // output streams sideways (above), so clear any an earlier run or the
+        // user left behind.
+        args.push(format!("output.{connector}.rotation.none"));
         if let Err(e) = kscreen_apply(&args) {
             tracing::warn!("could not position the output: {e:#}");
         }

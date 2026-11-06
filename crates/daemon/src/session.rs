@@ -112,12 +112,26 @@ impl Config {
     }
 }
 
-/// The base GStreamer adds to every timestamp leaving an encoder, in
-/// microseconds as this code sees it.
+/// The base GStreamer's video encoders add to every timestamp leaving them
+/// (1000 hours, so a negative DTS cannot occur), in microseconds.
 const ENCODER_PTS_BASE_US: u64 = 3_600_000_000_000;
 
-/// How far an encoder may move a timestamp and still be matched to its frame.
-const MATCH_WINDOW_US: u64 = 12_000;
+/// Rounding slack when matching a packet to its frame: both sides are
+/// truncated to microseconds.
+const MATCH_SLACK_US: u64 = 1_000;
+
+/// Packets to wait for before giving up on learning the encoder's shift.
+const LEARN_LIMIT: usize = 30;
+
+/// What is known about how the encoder shifted timestamps.
+enum Shift {
+    /// Packets seen so far, with when they arrived.
+    Learning(Vec<(u64, Instant)>),
+    /// packet timestamp + shift = frame timestamp.
+    Known(i64),
+    /// No single shift fitted; encode times are not reported.
+    Unknown,
+}
 
 /// Timestamps of one frame on the host.
 #[derive(Clone, Copy)]
@@ -132,9 +146,10 @@ struct FrameTrace {
 /// session pays nothing.
 struct Trace {
     enabled: bool,
-    /// Keyed by presentation timestamp in microseconds, which every stage
-    /// carries unchanged and the tablet echoes back.
+    /// Keyed by presentation timestamp in microseconds, as pushed into the
+    /// encoder.
     frames: Mutex<std::collections::HashMap<u64, FrameTrace>>,
+    shift: Mutex<Shift>,
     tablet: Mutex<Vec<protocol::Timing>>,
 }
 
@@ -143,6 +158,7 @@ impl Trace {
         Self {
             enabled,
             frames: Mutex::new(std::collections::HashMap::new()),
+            shift: Mutex::new(Shift::Learning(Vec::new())),
             tablet: Mutex::new(Vec::new()),
         }
     }
@@ -164,25 +180,51 @@ impl Trace {
     /// Note that the encoder produced a packet and return the key of the frame
     /// it belongs to.
     ///
-    /// The encoder re-stamps its output: GStreamer adds a fixed base of an hour
-    /// and nudges each timestamp by a few milliseconds, so the packet's
-    /// timestamp is not the one that went in. Match instead to the nearest
-    /// pushed frame that has not been matched yet; frames are further apart
-    /// than the nudge.
+    /// The encoder re-stamps its output: on top of the fixed base, the
+    /// timestamps come out shifted by a constant, the timestamp of the first
+    /// frame that reached it (seen on KDE: every packet exactly 66.9 ms before
+    /// its frame). Matching to the nearest frame instead pairs each packet with
+    /// one from that far back and reports the shift as encode time, so the
+    /// shift is learned from the first packets and then matched exactly.
     fn encoded(&self, pts_us: u64) -> Option<u64> {
         if !self.enabled {
             return None;
         }
-        let wanted = pts_us.saturating_sub(ENCODER_PTS_BASE_US);
+        let now = Instant::now();
+        let packet = pts_us.saturating_sub(ENCODER_PTS_BASE_US);
         let mut frames = self.frames.lock().unwrap();
-        let key = frames
-            .iter()
-            .filter(|(_, f)| f.encoded.is_none())
-            .map(|(k, _)| *k)
-            .filter(|k| k.abs_diff(wanted) <= MATCH_WINDOW_US)
-            .min_by_key(|k| k.abs_diff(wanted))?;
-        frames.get_mut(&key)?.encoded = Some(Instant::now());
-        Some(key)
+        let mut state = self.shift.lock().unwrap();
+        let shift = match std::mem::replace(&mut *state, Shift::Unknown) {
+            Shift::Known(shift) => {
+                *state = Shift::Known(shift);
+                shift
+            }
+            Shift::Unknown => return None,
+            Shift::Learning(mut seen) => {
+                seen.push((packet, now));
+                let mut keys: Vec<u64> = frames
+                    .iter()
+                    .filter(|(_, f)| f.encoded.is_none())
+                    .map(|(k, _)| *k)
+                    .collect();
+                keys.sort_unstable();
+                let packets: Vec<u64> = seen.iter().map(|(p, _)| *p).collect();
+                let Some(shift) = learn_shift(&keys, &packets) else {
+                    if seen.len() < LEARN_LIMIT {
+                        *state = Shift::Learning(seen);
+                    }
+                    return None;
+                };
+                *state = Shift::Known(shift);
+                // Credit the packets that arrived while the shift was unknown.
+                let mut last = None;
+                for (packet, at) in seen {
+                    last = match_frame(&mut frames, packet, shift, at);
+                }
+                return last;
+            }
+        };
+        match_frame(&mut frames, packet, shift, now)
     }
 
     fn sent(&self, key: Option<u64>) {
@@ -198,6 +240,49 @@ impl Trace {
             self.tablet.lock().unwrap().push(timing);
         }
     }
+}
+
+/// The one shift that maps every packet so far onto a pushed frame, once the
+/// packets pin it down.
+///
+/// Frames arrive unevenly (KWin sends one only when the screen changes), so two
+/// packets usually leave a single candidate. No shift at all is preferred when
+/// it fits, which is what an encoder that keeps timestamps gives.
+fn learn_shift(keys: &[u64], packets: &[u64]) -> Option<i64> {
+    if packets.len() < 2 {
+        return None;
+    }
+    let near = |at: i64| {
+        let i = keys.partition_point(|&k| (k as i64) < at - MATCH_SLACK_US as i64);
+        keys.get(i)
+            .is_some_and(|&k| (k as i64).abs_diff(at) <= MATCH_SLACK_US)
+    };
+    let fits = |shift: i64| packets.iter().all(|&p| near(p as i64 + shift));
+    if fits(0) {
+        return Some(0);
+    }
+    let first = packets[0] as i64;
+    let mut candidates = keys.iter().map(|&k| k as i64 - first).filter(|&s| fits(s));
+    let shift = candidates.next()?;
+    candidates.next().is_none().then_some(shift)
+}
+
+/// Mark the not yet matched frame at `packet + shift` as encoded at `at`.
+fn match_frame(
+    frames: &mut std::collections::HashMap<u64, FrameTrace>,
+    packet: u64,
+    shift: i64,
+    at: Instant,
+) -> Option<u64> {
+    let target = packet as i64 + shift;
+    let key = frames
+        .iter()
+        .filter(|(_, f)| f.encoded.is_none())
+        .map(|(k, _)| *k)
+        .filter(|k| (*k as i64).abs_diff(target) <= MATCH_SLACK_US)
+        .min_by_key(|k| (*k as i64).abs_diff(target))?;
+    frames.get_mut(&key)?.encoded = Some(at);
+    Some(key)
 }
 
 /// Everything between the virtual output and the encoded packets: how frames
@@ -752,4 +837,45 @@ fn row(label: &str, values: &mut Vec<f64>) {
         at(0.95),
         values[values.len() - 1]
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Frames pushed and packets out in a real KDE session at 120 fps: every
+    /// packet came out exactly 66 881 us before its frame.
+    const PUSHED: [u64; 6] = [33_105, 50_247, 66_881, 488_384, 497_436, 507_447];
+
+    #[test]
+    fn learns_the_shift_two_packets_pin_down() {
+        assert_eq!(learn_shift(&PUSHED, &[0, 421_503]), Some(66_881));
+    }
+
+    #[test]
+    fn one_packet_is_not_enough() {
+        assert_eq!(learn_shift(&PUSHED, &[0]), None);
+    }
+
+    #[test]
+    fn an_encoder_that_keeps_timestamps_needs_no_shift() {
+        assert_eq!(learn_shift(&[0, 8_333, 16_667], &[0, 8_333]), Some(0));
+    }
+
+    #[test]
+    fn packets_are_matched_to_their_own_frames() {
+        let trace = Trace::new(true);
+        let now = Instant::now();
+        for key in PUSHED {
+            trace.pushed(key, now);
+        }
+        // Learning: the first packet alone cannot be placed.
+        assert_eq!(trace.encoded(ENCODER_PTS_BASE_US), None);
+        assert_eq!(trace.encoded(ENCODER_PTS_BASE_US + 421_503), Some(488_384));
+        assert_eq!(trace.encoded(ENCODER_PTS_BASE_US + 430_555), Some(497_436));
+        // The packet seen while learning was credited to its frame afterwards.
+        let frames = trace.frames.lock().unwrap();
+        assert!(frames[&66_881].encoded.is_some());
+        assert!(frames[&33_105].encoded.is_none());
+    }
 }

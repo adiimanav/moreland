@@ -29,6 +29,8 @@
 //! The output's lifetime is the Wayland connection's. Dropping this struct, or
 //! losing the connection, removes the monitor.
 
+pub mod stream;
+
 use anyhow::{bail, Context, Result};
 use std::time::{Duration, Instant};
 use wayland_client::globals::{registry_queue_init, GlobalList, GlobalListContents};
@@ -278,6 +280,8 @@ pub struct PlasmaVirtualOutput {
     _conn: Connection,
     name: String,
     node_id: u32,
+    /// Logical size asked for, when this object created the output.
+    size: Option<(u32, u32)>,
 }
 
 impl PlasmaVirtualOutput {
@@ -398,6 +402,7 @@ impl PlasmaVirtualOutput {
             _conn: conn,
             name: name.to_string(),
             node_id,
+            size: Some((width.unsigned_abs(), height.unsigned_abs())),
         })
     }
 
@@ -445,12 +450,19 @@ impl PlasmaVirtualOutput {
             _conn: conn,
             name: output_name.to_string(),
             node_id,
+            size: None,
         })
     }
 
     /// PipeWire node carrying this output's frames.
     pub fn node_id(&self) -> u32 {
         self.node_id
+    }
+
+    /// The output's logical size, for a virtual output this object created;
+    /// `None` when it mirrors an existing screen.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        self.size
     }
 
     /// PipeWire object serial, when the compositor is new enough to send one.

@@ -29,7 +29,65 @@ pub enum Compositor {
     /// runtime IPC to *create* an output, so the session attaches to one the
     /// compositor was started with. See `docs/COMPATIBILITY.md`.
     Labwc,
+    /// KDE Plasma. KWin implements no capture protocol, but its own
+    /// `zkde_screencast_unstable_v1` creates the output and hands back a
+    /// PipeWire node in one call. Needs the `plasma` cargo feature.
+    Kwin,
     Unsupported,
+}
+
+/// Which edge of the main screen the tablet's monitor sits against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Right,
+    Left,
+    Above,
+    Below,
+}
+
+impl std::str::FromStr for Side {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "right" => Ok(Side::Right),
+            "left" => Ok(Side::Left),
+            "above" | "top" | "up" => Ok(Side::Above),
+            "below" | "bottom" | "down" => Ok(Side::Below),
+            other => Err(format!(
+                "unknown side {other:?}; expected right, left, above or below"
+            )),
+        }
+    }
+}
+
+/// Where the virtual monitor goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Exact top-left corner in layout pixels.
+    Coords(i32, i32),
+    /// Against one edge of the main screen, worked out from the live layout.
+    /// Only KDE reads the layout; elsewhere this falls back to the legacy
+    /// position of directly below a 1080p primary.
+    Side(Side),
+}
+
+/// Legacy position for compositors that cannot read the layout: below a
+/// primary at 0x0 that is no taller than 1080px.
+pub(crate) const FALLBACK_POSITION: (i32, i32) = (0, 1080);
+
+/// Top-left corner that puts a monitor of `size` against `side` of `primary`
+/// (`x, y, width, height`). The edge being shared is flush and the other axis
+/// is top- or left-aligned, which is where a pointer crosses most naturally.
+#[cfg_attr(not(feature = "plasma"), allow(dead_code))]
+pub fn place_beside(side: Side, primary: (i32, i32, i32, i32), size: (i32, i32)) -> (i32, i32) {
+    let (px, py, pw, ph) = primary;
+    match side {
+        Side::Right => (px + pw, py),
+        Side::Left => (px - size.0, py),
+        Side::Below => (px, py + ph),
+        Side::Above => (px, py - size.1),
+    }
 }
 
 impl Compositor {
@@ -67,6 +125,14 @@ impl Compositor {
         {
             return Compositor::Labwc;
         }
+        // KWin sets XDG_CURRENT_DESKTOP=KDE and has no instance marker of its
+        // own, so the round-trip is `kscreen-doctor`, which is also how the
+        // output is positioned afterwards.
+        if desktop.split(':').any(|d| d.eq_ignore_ascii_case("KDE"))
+            && run("kscreen-doctor", &["-o"]).is_ok()
+        {
+            return Compositor::Kwin;
+        }
         Compositor::Unsupported
     }
 
@@ -75,6 +141,7 @@ impl Compositor {
             Compositor::Hyprland => "Hyprland",
             Compositor::Sway => "Sway",
             Compositor::Labwc => "labwc",
+            Compositor::Kwin => "KDE Plasma",
             Compositor::Unsupported => "unsupported",
         }
     }
@@ -91,6 +158,13 @@ impl Compositor {
                  discover it. See docs/COMPATIBILITY.md."
             ),
             Compositor::Labwc => Ok(()),
+            #[cfg(feature = "plasma")]
+            Compositor::Kwin => Ok(()),
+            #[cfg(not(feature = "plasma"))]
+            Compositor::Kwin => bail!(
+                "this is KDE Plasma, but moreland was built without KDE support.\n\
+                 Rebuild with `cargo build --release --features plasma`."
+            ),
             Compositor::Unsupported => {
                 let desktop =
                     std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_else(|_| "unset".to_string());
@@ -268,10 +342,16 @@ fn restore_hyprland_monitor_state(
 pub struct VirtualOutput {
     compositor: Compositor,
     name: String,
+    /// On KDE the output's lifetime is the Wayland connection that created it,
+    /// so this is what keeps the monitor alive.
+    #[cfg(feature = "plasma")]
+    plasma: Option<capture::plasma::PlasmaVirtualOutput>,
 }
 
 impl VirtualOutput {
-    pub fn create(layout: &Layout) -> Result<Self> {
+    // `paint_cursor` only matters to the KDE backend.
+    #[cfg_attr(not(feature = "plasma"), allow(unused_variables))]
+    pub fn create(layout: &Layout, placement: Placement, paint_cursor: bool) -> Result<Self> {
         let name = &layout.name;
         let compositor = Compositor::detect();
         match compositor {
@@ -306,10 +386,11 @@ impl VirtualOutput {
                     )
                 })?;
                 run("wlr-randr", &args).with_context(|| format!("rotating labwc output {name}"))?;
-                return Ok(Self {
-                    compositor,
-                    name: name.to_string(),
-                });
+                return Ok(Self::new(compositor, name));
+            }
+            #[cfg(feature = "plasma")]
+            Compositor::Kwin => {
+                return Self::create_kwin(layout, placement, paint_cursor);
             }
             Compositor::Hyprland => {
                 let saved_states =
@@ -331,17 +412,25 @@ impl VirtualOutput {
                 let reply = run("hyprctl", &["keyword", "monitor", &spec])
                     .with_context(|| format!("configuring output as {spec}"))?;
 
-                // A compositor running the non-legacy (Lua) config parser
-                // rejects `keyword` with "keyword can't work with non-legacy
-                // parsers. Use eval." on stdout, with a zero exit status, so
-                // `run` reports success and the output silently keeps the
-                // compositor's defaults. Re-issue the same rule through
-                // `eval`, which that parser accepts. The classic parser, which
-                // the reference machine runs, applies the keyword directly.
-                if reply.contains("non-legacy parsers") {
+                // hyprctl reports a refused request on stdout with a zero exit
+                // status, so `run` calls it success and the output silently
+                // keeps the compositor's defaults. The wording changes between
+                // releases: 0.56's Lua parser says "keyword can't work with
+                // non-legacy parsers. Use eval.", 0.57 says "unknown request".
+                // So anything but "ok" counts as refused, and the same rule is
+                // re-issued through `eval`, which the Lua parser accepts.
+                if reply.trim() != "ok" {
                     let lua = layout.hyprland_lua();
-                    run("hyprctl", &["eval", &lua])
+                    let eval = run("hyprctl", &["eval", &lua])
                         .with_context(|| format!("configuring output as {lua}"))?;
+                    if eval.trim() != "ok" {
+                        tracing::warn!(
+                            "Hyprland applied no monitor rule: `keyword` said {:?}, \
+                             `eval` said {:?}",
+                            reply.trim(),
+                            eval.trim()
+                        );
+                    }
                 }
 
                 restore_hyprland_monitor_state(&saved_states, name)
@@ -352,14 +441,145 @@ impl VirtualOutput {
             other => other.ensure_supported()?,
         }
         std::thread::sleep(std::time::Duration::from_millis(400));
-        Ok(Self {
+        Ok(Self::new(compositor, name))
+    }
+
+    fn new(compositor: Compositor, name: &str) -> Self {
+        Self {
             compositor,
-            name: name.clone(),
-        })
+            name: name.to_string(),
+            #[cfg(feature = "plasma")]
+            plasma: None,
+        }
+    }
+
+    /// Create the monitor through `zkde_screencast_unstable_v1` and place it.
+    ///
+    /// The protocol request carries no refresh rate, and KWin gives the output
+    /// a single 60 Hz mode. Anything else is added afterwards as a custom mode
+    /// through `kscreen-doctor` and selected.
+    #[cfg(feature = "plasma")]
+    fn create_kwin(layout: &Layout, placement: Placement, paint_cursor: bool) -> Result<Self> {
+        use capture::plasma::{CursorMode, PlasmaVirtualOutput};
+
+        let name = layout.name.as_str();
+        // KWin's screencast does not carry an output's rotation: a rotated
+        // virtual output streams a landscape buffer with the picture still
+        // upright (KWin 6.8.2). So the output is never rotated here. A quarter
+        // turn instead creates it upright at its portrait size, and the tablet
+        // app turns itself to the stream's shape, as it does for Hyprland 0.57;
+        // the tablet's sensor decides which way up.
+        if !matches!(layout.transform, 0 | 1 | 3) {
+            tracing::warn!(
+                "--transform {} on KDE: only portrait (odd) or landscape (even) is \
+                 honoured; the tablet's own rotation decides which way up",
+                layout.transform
+            );
+        }
+        let (width, height) = layout.logical_size();
+        let refresh = layout.refresh;
+
+        let cursor = if paint_cursor {
+            CursorMode::Embedded
+        } else {
+            CursorMode::Hidden
+        };
+        let plasma = PlasmaVirtualOutput::create(
+            name,
+            "Moreland tablet monitor",
+            i32::try_from(width).context("width out of range")?,
+            i32::try_from(height).context("height out of range")?,
+            1.0,
+            cursor,
+        )?;
+
+        // KWin prefixes virtual outputs with `Virtual-`. A failure to place the
+        // output is not fatal: it still exists and still streams, only at
+        // KWin's default spot beside the primary.
+        let connector = format!("Virtual-{name}");
+        let (x, y) = match placement {
+            Placement::Coords(x, y) => (x, y),
+            Placement::Side(side) => match kwin_primary_geometry(&connector) {
+                Ok(primary) => {
+                    let spot = place_beside(side, primary, (width as i32, height as i32));
+                    tracing::info!("placing the output {side:?} of the main screen at {spot:?}");
+                    spot
+                }
+                Err(e) => {
+                    tracing::warn!("could not read the screen layout ({e:#}); using the default spot");
+                    FALLBACK_POSITION
+                }
+            },
+        };
+        // KWin refuses a negative position, so a spot left of or above the
+        // other screens moves them the other way instead, in the same request.
+        let others = if x < 0 || y < 0 {
+            kwin_positions(&connector).unwrap_or_else(|e| {
+                tracing::warn!("could not read the other screens' positions ({e:#})");
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+        let request = kwin_layout_request((&connector, x, y), &others);
+        if request.len() > 1 {
+            tracing::info!("shifting the other screens to make room at ({x}, {y})");
+        }
+        let mut args: Vec<String> = request
+            .iter()
+            .map(|(name, x, y)| format!("output.{name}.position.{x},{y}"))
+            .collect();
+        // KScreen remembers a rotation per set of screens, and a rotated
+        // output streams sideways (above), so clear any an earlier run or the
+        // user left behind.
+        args.push(format!("output.{connector}.rotation.none"));
+        if let Err(e) = kscreen_apply(&args) {
+            tracing::warn!("could not position the output: {e:#}");
+        }
+
+        if refresh != 60 {
+            if let Err(e) = set_kwin_refresh(&format!("Virtual-{name}"), width, height, refresh) {
+                tracing::warn!(
+                    "could not set {refresh} Hz on the output; staying at 60 Hz: {e:#}"
+                );
+            }
+        }
+
+        let mut output = Self::new(Compositor::Kwin, name);
+        output.plasma = Some(plasma);
+        Ok(output)
+    }
+
+    /// PipeWire node carrying this output's frames. KDE only.
+    #[cfg(feature = "plasma")]
+    pub fn pipewire_node(&self) -> Option<u32> {
+        self.plasma.as_ref().map(|p| p.node_id())
+    }
+
+    /// The KDE output's own size, which its stream should be asked for.
+    #[cfg(feature = "plasma")]
+    pub fn pipewire_size(&self) -> Option<(u32, u32)> {
+        self.plasma.as_ref().and_then(|p| p.size())
+    }
+
+    /// Service the compositor connection. Returns false once the compositor
+    /// has removed the output from its side. A no-op everywhere but KDE.
+    #[cfg(feature = "plasma")]
+    pub fn poll(&mut self) -> Result<bool> {
+        match &mut self.plasma {
+            Some(p) => p.poll(),
+            None => Ok(true),
+        }
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The name KWin gives this output, which is what its D-Bus API takes.
+    /// `None` on every other compositor.
+    pub fn kwin_connector(&self) -> Option<String> {
+        (self.compositor == Compositor::Kwin).then(|| format!("Virtual-{}", self.name))
     }
 
     /// Whether the requested mode and position were actually applied. False on
@@ -377,11 +597,285 @@ impl Drop for VirtualOutput {
             Compositor::Sway => run("swaymsg", &["output", &self.name, "unplug"]),
             // Never created here, so not ours to remove.
             Compositor::Labwc => return,
+            // Dropping `plasma` removes the monitor.
+            Compositor::Kwin => return,
             Compositor::Unsupported => return,
         };
         match result {
             Ok(_) => tracing::debug!("removed output {}", self.name),
             Err(e) => tracing::warn!("failed to remove output {}: {e}", self.name),
         }
+    }
+}
+
+/// How close to the requested rate a mode must be to count as a match. The
+/// tablet's panel runs at exactly the nominal rate, so the leftover difference
+/// shows up as one repeated frame every 1 / difference seconds: 0.02 Hz is a
+/// hitch about every 50 s, against every 8 s for the 89.88 Hz KWin tends to
+/// produce first.
+#[cfg(feature = "plasma")]
+const REFRESH_TOLERANCE_HZ: f64 = 0.02;
+
+/// Requested rates to try, in millihertz offsets from the target, when no
+/// existing mode is close enough. KWin derives pixel-clock timings from the
+/// request and rounds to its own steps, so the result is not the request; a
+/// few nearby asks land on different roundings.
+#[cfg(feature = "plasma")]
+const REFRESH_PROBES_MHZ: [i32; 5] = [0, 20, 40, 60, 80];
+
+/// All modes of `connector` at `width`x`height`, as `(id, refresh Hz)`.
+#[cfg(feature = "plasma")]
+fn kwin_modes(connector: &str, width: u32, height: u32) -> Result<Vec<(String, f64)>> {
+    let json = run("kscreen-doctor", &["-j"]).context("reading the KWin output list")?;
+    let doc: serde_json::Value = serde_json::from_str(&json).context("parsing kscreen JSON")?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .context("kscreen JSON has no outputs")?;
+    let output = outputs
+        .iter()
+        .find(|o| o.get("name").and_then(|n| n.as_str()) == Some(connector))
+        .with_context(|| format!("KWin has no output {connector}"))?;
+
+    let mut modes = Vec::new();
+    for mode in output
+        .get("modes")
+        .and_then(|m| m.as_array())
+        .context("output has no modes")?
+    {
+        let size = mode.get("size");
+        let dim = |key: &str| size.and_then(|s| s.get(key)).and_then(|v| v.as_u64());
+        if dim("width") != Some(u64::from(width)) || dim("height") != Some(u64::from(height)) {
+            continue;
+        }
+        let id = match mode.get("id") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(v) => v.to_string(),
+            None => continue,
+        };
+        if let Some(hz) = mode.get("refreshRate").and_then(|r| r.as_f64()) {
+            modes.push((id, hz));
+        }
+    }
+    Ok(modes)
+}
+
+#[cfg(feature = "plasma")]
+fn closest_mode(modes: &[(String, f64)], target: f64) -> Option<&(String, f64)> {
+    modes
+        .iter()
+        .min_by(|a, b| (a.1 - target).abs().total_cmp(&(b.1 - target).abs()))
+}
+
+/// Switch `connector` to the available mode nearest `refresh` Hz, creating
+/// custom modes only if nothing is within [`REFRESH_TOLERANCE_HZ`].
+///
+/// Custom modes are never removed in a session and every new one lengthens
+/// KWin's list, so an existing close-enough mode is reused rather than added.
+#[cfg(feature = "plasma")]
+fn set_kwin_refresh(connector: &str, width: u32, height: u32, refresh: u32) -> Result<()> {
+    let target = f64::from(refresh);
+    let mut modes = kwin_modes(connector, width, height)?;
+
+    for offset in REFRESH_PROBES_MHZ {
+        let within = closest_mode(&modes, target)
+            .is_some_and(|(_, hz)| (hz - target).abs() <= REFRESH_TOLERANCE_HZ);
+        if within {
+            break;
+        }
+        let mhz = refresh * 1000 + offset as u32;
+        let add = format!("output.{connector}.addCustomMode.{width}.{height}.{mhz}.reduced");
+        run("kscreen-doctor", &[&add]).context("adding a custom mode")?;
+        modes = kwin_modes(connector, width, height)?;
+    }
+
+    let (id, hz) = closest_mode(&modes, target).context("no modes at this size")?;
+    run(
+        "kscreen-doctor",
+        &[&format!("output.{connector}.mode.{id}")],
+    )
+    .with_context(|| format!("selecting mode {id} ({hz:.3} Hz)"))?;
+    tracing::info!(
+        "refresh {hz:.3} Hz selected (asked for {refresh}; {:+.3} Hz off)",
+        hz - target
+    );
+    Ok(())
+}
+
+/// Every position to request so that `ours` lands where asked, ours first.
+///
+/// KWin's layout starts at 0,0 and refuses a negative position outright, so a
+/// spot left of or above everything is reached by moving everything else right
+/// or down by the same amount. A spot already in range asks for nothing else.
+#[cfg_attr(not(feature = "plasma"), allow(dead_code))]
+fn kwin_layout_request(
+    ours: (&str, i32, i32),
+    others: &[(String, i32, i32)],
+) -> Vec<(String, i32, i32)> {
+    let (name, x, y) = ours;
+    let (dx, dy) = ((-x).max(0), (-y).max(0));
+    let mut request = vec![(name.to_string(), x + dx, y + dy)];
+    if dx > 0 || dy > 0 {
+        request.extend(
+            others
+                .iter()
+                .map(|(other, ox, oy)| (other.clone(), ox + dx, oy + dy)),
+        );
+    }
+    request
+}
+
+/// Name and position of every enabled screen except `except`.
+#[cfg(feature = "plasma")]
+fn kwin_positions(except: &str) -> Result<Vec<(String, i32, i32)>> {
+    let json = run("kscreen-doctor", &["-j"]).context("reading the KWin output list")?;
+    let doc: serde_json::Value = serde_json::from_str(&json).context("parsing kscreen JSON")?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .context("kscreen JSON has no outputs")?;
+    let int = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_i64()).map(|v| v as i32);
+    Ok(outputs
+        .iter()
+        .filter(|o| o.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+        .filter_map(|o| {
+            let name = o.get("name").and_then(|n| n.as_str())?;
+            let pos = o.get("pos");
+            (name != except).then(|| {
+                (
+                    name.to_string(),
+                    int(pos.and_then(|p| p.get("x"))).unwrap_or(0),
+                    int(pos.and_then(|p| p.get("y"))).unwrap_or(0),
+                )
+            })
+        })
+        .collect())
+}
+
+/// Apply a `kscreen-doctor` request, treating a rejected one as an error.
+///
+/// kscreen-doctor reports a configuration KWin refused ("applying config
+/// failed! ...") on stdout and still exits 0, so the exit status alone would
+/// report success for a request that changed nothing.
+#[cfg(feature = "plasma")]
+fn kscreen_apply(args: &[String]) -> Result<()> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run("kscreen-doctor", &args)?;
+    if let Some(line) = out.lines().find(|line| line.contains("failed")) {
+        bail!("kscreen-doctor {}: {}", args.join(" "), line.trim());
+    }
+    Ok(())
+}
+
+/// Position and logical size `(x, y, width, height)` of the main screen: the
+/// enabled output with the best (lowest) priority, ignoring `except`.
+#[cfg(feature = "plasma")]
+fn kwin_primary_geometry(except: &str) -> Result<(i32, i32, i32, i32)> {
+    let json = run("kscreen-doctor", &["-j"]).context("reading the KWin output list")?;
+    let doc: serde_json::Value = serde_json::from_str(&json).context("parsing kscreen JSON")?;
+    let outputs = doc
+        .get("outputs")
+        .and_then(|o| o.as_array())
+        .context("kscreen JSON has no outputs")?;
+
+    let primary = outputs
+        .iter()
+        .filter(|o| o.get("name").and_then(|n| n.as_str()) != Some(except))
+        .filter(|o| o.get("enabled").and_then(|e| e.as_bool()).unwrap_or(false))
+        .min_by_key(|o| o.get("priority").and_then(|p| p.as_i64()).unwrap_or(i64::MAX))
+        .context("no enabled screen to place the tablet beside")?;
+
+    let int = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_i64()).map(|v| v as i32);
+    let x = int(primary.get("pos").and_then(|p| p.get("x"))).unwrap_or(0);
+    let y = int(primary.get("pos").and_then(|p| p.get("y"))).unwrap_or(0);
+    let mut width = int(primary.get("size").and_then(|s| s.get("width")))
+        .context("screen has no width")?;
+    let mut height = int(primary.get("size").and_then(|s| s.get("height")))
+        .context("screen has no height")?;
+
+    // `size` is the mode in physical pixels. The layout works in logical
+    // pixels, so undo any scaling, and swap the axes for a screen turned on
+    // its side (KWin's rotation codes 2 and 8 are 90 and 270 degrees).
+    if matches!(primary.get("rotation").and_then(|r| r.as_i64()), Some(2) | Some(8)) {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let scale = primary
+        .get("scale")
+        .and_then(|s| s.as_f64())
+        .filter(|s| *s > 0.0)
+        .unwrap_or(1.0);
+    Ok((
+        x,
+        y,
+        (f64::from(width) / scale).round() as i32,
+        (f64::from(height) / scale).round() as i32,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn others() -> Vec<(String, i32, i32)> {
+        vec![("eDP-1".to_string(), 0, 0)]
+    }
+
+    #[test]
+    fn a_spot_in_range_moves_nothing_else() {
+        assert_eq!(
+            kwin_layout_request(("Virtual-moreland", 1746, 0), &others()),
+            vec![("Virtual-moreland".to_string(), 1746, 0)]
+        );
+    }
+
+    #[test]
+    fn left_of_everything_moves_everything_else_right() {
+        // What `--side left` asks for beside a laptop at 0,0; KWin refuses the
+        // -1920 itself, so the laptop moves over instead.
+        assert_eq!(
+            kwin_layout_request(("Virtual-moreland", -1920, 0), &others()),
+            vec![
+                ("Virtual-moreland".to_string(), 0, 0),
+                ("eDP-1".to_string(), 1920, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn above_everything_moves_everything_else_down() {
+        assert_eq!(
+            kwin_layout_request(("Virtual-moreland", 0, -1200), &others()),
+            vec![
+                ("Virtual-moreland".to_string(), 0, 0),
+                ("eDP-1".to_string(), 0, 1200),
+            ]
+        );
+    }
+
+    const LAPTOP: (i32, i32, i32, i32) = (0, 0, 1920, 1080);
+    const TABLET: (i32, i32) = (2560, 1600);
+
+    #[test]
+    fn sits_against_each_edge_of_the_main_screen() {
+        assert_eq!(place_beside(Side::Right, LAPTOP, TABLET), (1920, 0));
+        assert_eq!(place_beside(Side::Below, LAPTOP, TABLET), (0, 1080));
+        assert_eq!(place_beside(Side::Left, LAPTOP, TABLET), (-2560, 0));
+        assert_eq!(place_beside(Side::Above, LAPTOP, TABLET), (0, -1600));
+    }
+
+    #[test]
+    fn follows_a_main_screen_that_is_not_at_the_origin() {
+        let offset = (1000, 200, 1920, 1080);
+        assert_eq!(place_beside(Side::Right, offset, TABLET), (2920, 200));
+        assert_eq!(place_beside(Side::Left, offset, TABLET), (-1560, 200));
+    }
+
+    #[test]
+    fn side_names_parse_with_friendly_aliases() {
+        assert_eq!("right".parse(), Ok(Side::Right));
+        assert_eq!("LEFT".parse(), Ok(Side::Left));
+        assert_eq!("top".parse(), Ok(Side::Above));
+        assert_eq!("bottom".parse(), Ok(Side::Below));
+        assert!("diagonal".parse::<Side>().is_err());
     }
 }

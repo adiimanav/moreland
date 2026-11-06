@@ -12,6 +12,7 @@
 mod display;
 mod output;
 mod session;
+mod touch;
 mod tracker;
 
 use anyhow::{Context, Result};
@@ -22,6 +23,10 @@ use tracker::DeviceTracker;
 
 struct Args {
     config: session::Config,
+    /// Whether `--fps` was passed, so a compositor default can apply otherwise.
+    fps_given: bool,
+    /// Whether --show-cursor / --hide-cursor was passed.
+    cursor_given: bool,
     once: bool,
     seconds: Option<u64>,
 }
@@ -29,6 +34,8 @@ struct Args {
 fn parse_args() -> Args {
     let mut config = session::Config::default();
     let mut once = false;
+    let mut fps_given = false;
+    let mut cursor_given = false;
     let mut seconds = None;
     let mut print_rule = false;
     let (mut width, mut height) = (None, None);
@@ -43,20 +50,24 @@ fn parse_args() -> Args {
             "--height" => height = Some(next_u32(1200)),
             "--max-width" => config.max_width = next_u32(1920),
             "--native" => config.max_width = u32::MAX,
-            "--fps" => config.fps = next_u32(60),
-            "--bitrate" => config.bitrate_kbps = next_u32(20_000),
-            "--position" => {
-                config.position_x = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(config.position_x);
+            "--fps" => {
+                config.fps = next_u32(60);
+                fps_given = true;
             }
-            "--position-y" => {
-                config.position_y = it
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(config.position_y);
-            }
+            "--bitrate" => config.bitrate_kbps = Some(next_u32(20_000)),
+            "--position" => config.position_x = it.next().and_then(|v| v.parse().ok()),
+            "--position-y" => config.position_y = it.next().and_then(|v| v.parse().ok()),
+            "--side" => match it.next().as_deref().map(str::parse::<output::Side>) {
+                Some(Ok(side)) => config.side = Some(side),
+                Some(Err(e)) => {
+                    eprintln!("--side: {e}");
+                    std::process::exit(2);
+                }
+                None => {
+                    eprintln!("--side needs a value: right, left, above or below");
+                    std::process::exit(2);
+                }
+            },
             "--output-name" => {
                 if let Some(name) = it.next() {
                     config.output_name = name;
@@ -73,7 +84,15 @@ fn parse_args() -> Args {
                     }
                 }
             }
-            "--show-cursor" => config.paint_cursor = true,
+            "--show-cursor" => {
+                config.paint_cursor = true;
+                cursor_given = true;
+            }
+            "--no-palm-rejection" => config.palm_rejection = false,
+            "--hide-cursor" => {
+                config.paint_cursor = false;
+                cursor_given = true;
+            }
             "--print-rule" => print_rule = true,
             "--once" => once = true,
             "--stats" => config.stats = true,
@@ -100,6 +119,10 @@ fn parse_args() -> Args {
         (None, None) => None,
     };
 
+    if config.side.is_some() && (config.position_x.is_some() || config.position_y.is_some()) {
+        eprintln!("--side is ignored because --position / --position-y was also given");
+    }
+
     if print_rule {
         match print_layout(&config) {
             Ok(layout) => print!("{layout}"),
@@ -113,6 +136,8 @@ fn parse_args() -> Args {
 
     Args {
         config,
+        fps_given,
+        cursor_given,
         once,
         seconds,
     }
@@ -126,7 +151,7 @@ fn main() -> Result<()> {
         )
         .init();
 
-    let args = parse_args();
+    let mut args = parse_args();
 
     // Refuse to start rather than discovering this once per device event. The
     // compositor cannot change under a running daemon — the unit is
@@ -136,6 +161,18 @@ fn main() -> Result<()> {
     let compositor = output::Compositor::detect();
     compositor.ensure_supported()?;
     tracing::info!("compositor: {}", compositor.name());
+
+    // The KDE path copies every frame through system memory, and 90 Hz showed
+    // micro-stutter on a GTX 1650 where 60 Hz was smooth. Default to 60 there;
+    // an explicit --fps is always honoured.
+    if compositor == output::Compositor::Kwin && !args.fps_given {
+        args.config.fps = 60;
+    }
+    // A second monitor with no pointer on it is unusable, and KWin composites
+    // the cursor into the stream cheaply, so show it unless told not to.
+    if compositor == output::Compositor::Kwin && !args.cursor_given {
+        args.config.paint_cursor = true;
+    }
 
     let shutdown = Arc::new(AtomicBool::new(false));
 

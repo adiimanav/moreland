@@ -6,6 +6,7 @@ import android.app.Activity
 import android.content.pm.ActivityInfo
 import android.graphics.Color
 import android.os.Bundle
+import android.view.MotionEvent
 import android.view.SurfaceHolder
 import android.view.SurfaceView
 import android.view.View
@@ -25,6 +26,7 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
     private lateinit var surfaceView: SurfaceView
     private lateinit var status: TextView
     private var stream: VideoStream? = null
+    private var input: InputForwarder? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,7 +49,10 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
         root.addView(status, FrameLayout.LayoutParams(MATCH, WRAP))
         setContentView(root)
 
-        stream = VideoStream(::followStreamShape).also { it.start() }
+        stream = VideoStream(::followStreamShape).also { s ->
+            s.start()
+            input = InputForwarder { s.send(it) }
+        }
         surfaceView.holder.addCallback(this)
         goImmersive()
     }
@@ -67,6 +72,25 @@ class DisplayActivity : Activity(), SurfaceHolder.Callback {
         } else {
             ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE
         }
+    }
+
+    // Touch and pen go to the host whatever view they land on, so the status
+    // text or a flashing system bar can never swallow them.
+    override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+        // By default Android batches touch samples to the display's refresh, so
+        // an event can wait up to a frame before this code even sees it. Ask
+        // for each sample as it arrives; this lasts until the finger lifts.
+        if (ev.actionMasked == MotionEvent.ACTION_DOWN) {
+            surfaceView.requestUnbufferedDispatch(ev)
+        }
+        input?.forward(ev, surfaceView.width, surfaceView.height)
+        return super.dispatchTouchEvent(ev)
+    }
+
+    // A pen hovering above the glass arrives as a generic motion event.
+    override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {
+        input?.forward(ev, surfaceView.width, surfaceView.height)
+        return super.dispatchGenericMotionEvent(ev)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {

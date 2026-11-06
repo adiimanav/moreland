@@ -44,7 +44,18 @@ elif { [ "${XDG_CURRENT_DESKTOP:-}" = "labwc" ] \
     COMPOSITOR="labwc"
 fi
 
+# KWin is identified by its desktop name plus a live kscreen-doctor round-trip,
+# the same confirmation the daemon uses.
+if [ "$COMPOSITOR" = "unsupported" ]; then
+    case "${XDG_CURRENT_DESKTOP:-}" in
+        *KDE*) command -v kscreen-doctor >/dev/null 2>&1 \
+                   && kscreen-doctor -o >/dev/null 2>&1 && COMPOSITOR="KDE" ;;
+    esac
+fi
+
 case "$COMPOSITOR" in
+    KDE)      pass "compositor: KDE Plasma (KWin) — supported with --features plasma, verified on one setup"
+              info "Streams through zkde_screencast_unstable_v1 + PipeWire." ;;
     Hyprland) pass "compositor: Hyprland — supported, verified" ;;
     Sway)     warn "compositor: Sway — capture should work, output creation unimplemented"
               block "Sway virtual-output creation is not implemented" ;;
@@ -63,6 +74,11 @@ if [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ] && [ "$COMPOSITOR" != "Hyprland" ];
     info "inherit it. Reset with: systemctl --user import-environment"
 fi
 
+# On KDE the capture path is PipeWire, not ext-image-copy-capture, so the
+# Wayland-protocol and VA-API checks below are informational there.
+IS_KDE=0
+case "${XDG_CURRENT_DESKTOP:-}" in *KDE*) IS_KDE=1 ;; esac
+
 # ------------------------------------------------------- capture protocol ---
 head_ "Capture protocol (ext-image-copy-capture-v1)"
 
@@ -76,7 +92,7 @@ else
         pass "ext_image_copy_capture_manager_v1"
     else
         fail "ext_image_copy_capture_manager_v1 — ABSENT"
-        block "compositor does not implement ext-image-copy-capture-v1"
+        [ "$IS_KDE" = 1 ] || block "compositor does not implement ext-image-copy-capture-v1"
     fi
 
     if have ext_output_image_capture_source_manager_v1; then
@@ -89,28 +105,27 @@ else
         pass "zwp_linux_dmabuf_v1 (zero-copy import)"
     else
         fail "zwp_linux_dmabuf_v1 — ABSENT"
-        block "no linux-dmabuf; the zero-copy path cannot work"
+        [ "$IS_KDE" = 1 ] || block "no linux-dmabuf; the zero-copy path cannot work"
     fi
 
     # KWin exposes capture only through its own privileged protocol, so it
     # never appears in a plain registry listing. Say so rather than leaving
     # the absence above looking like a packaging fault.
-    if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ]; then
+    if [ "$IS_KDE" = 1 ]; then
         info ""
         info "KWin implements neither the ext- nor the wlr- capture protocols,"
-        info "and KDE has declined to (bug 513785). It exposes capture through"
+        info "and KDE has declined to (bug 513785). moreland uses"
         info "zkde_screencast_unstable_v1 instead, whose stream_virtual_output"
         info "returns a virtual output AND its PipeWire stream in one call."
-        info "See docs/06-plasma-backend.md."
+        info "Build with --features plasma. See docs/06-plasma-backend.md."
     fi
 fi
 
 # ------------------------------------------------- KDE backend groundwork ---
-# Not yet wired to anything: the Plasma capture backend is unimplemented. This
-# reports whether the privileged-interface grant is in place, because it fails
+# Reports whether the privileged-interface grant is in place, because it fails
 # silently — KWin denies the protocol with no diagnostic anywhere.
-if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ]; then
-    head_ "KDE backend prerequisites (groundwork; backend not yet implemented)"
+if [ "$IS_KDE" = 1 ]; then
+    head_ "KDE backend prerequisites"
 
     ENTRY="$HOME/.local/share/applications/moreland.desktop"
     if [ -f "$ENTRY" ]; then
@@ -136,10 +151,27 @@ if [ "${XDG_CURRENT_DESKTOP:-}" = "KDE" ]; then
 fi
 
 # ---------------------------------------------------------------- encoder ---
-head_ "Encoder (VA-API H.264)"
+if [ "$IS_KDE" = 1 ]; then
+    head_ "Encoder (NVENC or x264; VA-API is optional on KDE)"
+    ENCODER_ELEMENTS="h264parse"
+    if command -v gst-inspect-1.0 >/dev/null 2>&1; then
+        if gst-inspect-1.0 nvh264enc >/dev/null 2>&1; then
+            pass "GStreamer element: nvh264enc (NVENC)"
+        elif gst-inspect-1.0 x264enc >/dev/null 2>&1; then
+            pass "GStreamer element: x264enc (CPU)"
+            info "NVENC (nvh264enc) is preferred when an NVIDIA GPU is present."
+        else
+            fail "neither nvh264enc nor x264enc is installed"
+            block "no H.264 encoder element (gst-plugins-bad nvcodec, or gst-plugins-ugly x264)"
+        fi
+    fi
+else
+    head_ "Encoder (VA-API H.264)"
+    ENCODER_ELEMENTS="vapostproc vah264enc h264parse"
+fi
 
 if command -v gst-inspect-1.0 >/dev/null 2>&1; then
-    for element in vapostproc vah264enc h264parse; do
+    for element in $ENCODER_ELEMENTS; do
         if gst-inspect-1.0 "$element" >/dev/null 2>&1; then
             pass "GStreamer element: $element"
         else
@@ -156,8 +188,14 @@ if command -v vainfo >/dev/null 2>&1; then
     if vainfo 2>/dev/null | grep -q 'VAProfileH264.*VAEntrypointEncSlice'; then
         pass "VA-API H.264 encode: $(vainfo 2>/dev/null | grep -oP 'Driver version: \K.*' | head -1)"
     else
-        fail "no VA-API H.264 encode entrypoint"
-        block "GPU/driver exposes no VA-API H.264 encoder"
+        if [ "$IS_KDE" = 1 ]; then
+            warn "no VA-API H.264 encode entrypoint"
+            info "Fine on KDE if nvh264enc or x264enc is available (see above)."
+            info "On Fedora, stock Mesa omits H.264; mesa-va-drivers-freeworld adds it."
+        else
+            fail "no VA-API H.264 encode entrypoint"
+            block "GPU/driver exposes no VA-API H.264 encoder"
+        fi
     fi
 else
     warn "vainfo not installed — cannot confirm the encoder (package: libva-utils)"

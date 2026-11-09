@@ -15,7 +15,6 @@ use capture::session::{BufferMode, Capture, CaptureConfig};
 use encoder::{Encoder, EncoderConfig};
 use std::collections::VecDeque;
 use std::io::Write;
-use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -49,6 +48,7 @@ fn main() -> Result<()> {
         mode: BufferMode::Dmabuf,
         pool_size: 3,
         allowed_modifiers: encoder::supported_modifiers(capture::XR24),
+        allowed_formats: encoder::supported_dmabuf_formats(),
         paint_cursor: false,
     };
     let mut capture = Capture::new(&output, &capture_config)?;
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
     for i in 0..20u64 {
         let timing = capture.capture_frame()?;
         let dmabuf = capture.dmabuf(timing.buffer_index).unwrap();
-        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, i * frame_duration_ns)?;
+        encoder.push_frame(dmabuf, i * frame_duration_ns)?;
     }
     std::thread::sleep(Duration::from_millis(200));
     submitted.lock().unwrap().clear();
@@ -154,7 +154,7 @@ fn main() -> Result<()> {
             .context("capture returned no DMA-BUF")?;
         let pts = (i + 100) * frame_duration_ns;
         submitted.lock().unwrap().push_back(Instant::now());
-        encoder.push_frame(dmabuf.planes[0].fd.as_fd(), dmabuf.planes[0].offset, dmabuf.planes[0].stride, pts)?;
+        encoder.push_frame(dmabuf, pts)?;
     }
     let wall = wall_start.elapsed();
 

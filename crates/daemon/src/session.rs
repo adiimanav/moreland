@@ -7,7 +7,6 @@ use capture::session::{BufferMode, Capture, CaptureConfig};
 use encoder::{Encoder, EncoderConfig, PacketSource};
 use std::collections::VecDeque;
 use std::io::Read;
-use std::os::fd::AsFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -328,9 +327,15 @@ impl ExtPipeline {
                 mode: BufferMode::Dmabuf,
                 pool_size: 3,
                 allowed_modifiers,
+                allowed_formats: encoder::supported_dmabuf_formats(),
                 paint_cursor: config.paint_cursor,
             },
         )?;
+        tracing::info!(
+            "capture format {} modifier 0x{:016x}",
+            capture::session::fourcc_name(capture.format),
+            capture.modifier.unwrap_or(0)
+        );
         let encoder = Arc::new(Encoder::new(&EncoderConfig {
             width: capture.width,
             height: capture.height,
@@ -366,12 +371,7 @@ impl Pipeline for ExtPipeline {
             .capture
             .dmabuf(timing.buffer_index)
             .context("capture produced no DMA-BUF")?;
-        self.encoder.push_frame(
-            dmabuf.planes[0].fd.as_fd(),
-            dmabuf.planes[0].offset,
-            dmabuf.planes[0].stride,
-            index * frame_ns,
-        )?;
+        self.encoder.push_frame(dmabuf, index * frame_ns)?;
         trace.pushed(index * frame_ns / 1000, captured);
         Ok(true)
     }

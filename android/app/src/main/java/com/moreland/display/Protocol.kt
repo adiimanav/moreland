@@ -5,6 +5,7 @@ package com.moreland.display
 import java.io.DataInputStream
 import java.io.EOFException
 import java.io.IOException
+import java.nio.ByteBuffer
 
 /**
  * Mirror of `crates/protocol`.
@@ -13,14 +14,62 @@ import java.io.IOException
  * [DataInputStream] can be used directly here — no byte-swapping anywhere.
  */
 object Protocol {
+    /** Used only when launched by hand; the daemon passes [SOCKET_EXTRA]. */
     const val SOCKET_NAME = "moreland"
 
+    /** Intent extra carrying this session's socket name from the daemon. */
+    const val SOCKET_EXTRA = "com.moreland.display.SOCKET"
+
+    private val SOCKET_NAME_PATTERN = Regex("[A-Za-z0-9._-]{1,64}")
+
+    /** The socket named in the launch intent, or the default when absent or malformed. */
+    fun socketName(extra: String?): String =
+        extra?.takeIf { SOCKET_NAME_PATTERN.matches(it) } ?: SOCKET_NAME
+
+    /**
+     * `adb forward` connections arrive from adbd, which runs as `shell`, or
+     * as `root` after `adb root`. Any other peer is another app on this
+     * device and must not be able to drive the display.
+     */
+    private const val SHELL_UID = 2000
+    private const val ROOT_UID = 0
+
+    fun isTrustedPeer(uid: Int): Boolean = uid == SHELL_UID || uid == ROOT_UID
+
     private const val MAGIC = 0x4D524C44 // "MRLD"
-    const val VERSION = 1
+    const val VERSION = 3
 
     const val STREAM_HEADER_LEN = 16
     const val FRAME_HEADER_LEN = 16
     const val ACK_LEN = 8
+    const val POINTER_LEN = 28
+
+    /**
+     * Device -> host message types, mirroring the registry in
+     * `crates/protocol/src/lib.rs`. 0x04 (orientation) and 0x05 (keyframe
+     * request) are reserved there for messages not implemented yet.
+     */
+    const val MSG_ACK = 0x01
+    const val MSG_POINTER = 0x02
+    const val MSG_TIMING = 0x03
+    const val TIMING_LEN = 24
+
+    const val ACTION_DOWN = 0
+    const val ACTION_UP = 1
+    const val ACTION_MOVE = 2
+    const val ACTION_CANCEL = 3
+    const val ACTION_HOVER_MOVE = 4
+    const val ACTION_HOVER_EXIT = 5
+
+    const val TOOL_FINGER = 0
+    const val TOOL_PEN = 1
+    const val TOOL_ERASER = 2
+
+    const val BUTTON_STYLUS_PRIMARY = 1
+    const val BUTTON_STYLUS_SECONDARY = 2
+
+    /** Set on the last pointer of one MotionEvent. */
+    const val POINTER_FLAG_LAST = 1
 
     const val FLAG_KEYFRAME = 0x01
 
@@ -86,14 +135,63 @@ object Protocol {
         }
     }
 
-    fun encodeAck(ptsNs: Long): ByteArray = byteArrayOf(
-        (ptsNs ushr 56).toByte(),
-        (ptsNs ushr 48).toByte(),
-        (ptsNs ushr 40).toByte(),
-        (ptsNs ushr 32).toByte(),
-        (ptsNs ushr 24).toByte(),
-        (ptsNs ushr 16).toByte(),
-        (ptsNs ushr 8).toByte(),
-        ptsNs.toByte(),
-    )
+    fun encodeAck(ptsNs: Long): ByteArray {
+        val buf = ByteBuffer.allocate(1 + ACK_LEN) // big-endian by default
+        buf.put(MSG_ACK.toByte())
+        buf.putLong(ptsNs)
+        return buf.array()
+    }
+
+    /**
+     * One pointer of one touch or pen event. Positions are fractions of the
+     * streamed surface, so the host needs no idea of this screen's pixel size.
+     */
+    fun encodePointer(
+        action: Int,
+        tool: Int,
+        pointerId: Int,
+        buttons: Int,
+        flags: Int,
+        x: Float,
+        y: Float,
+        pressure: Float,
+        tilt: Float,
+        orientation: Float,
+    ): ByteArray {
+        val buf = ByteBuffer.allocate(1 + POINTER_LEN)
+        buf.put(MSG_POINTER.toByte())
+        buf.put(action.toByte())
+        buf.put(tool.toByte())
+        buf.put(pointerId.toByte())
+        buf.put(buttons.toByte())
+        buf.put(flags.toByte())
+        buf.put(0).put(0).put(0) // reserved
+        buf.putFloat(x)
+        buf.putFloat(y)
+        buf.putFloat(pressure)
+        buf.putFloat(tilt)
+        buf.putFloat(orientation)
+        return buf.array()
+    }
+
+    /**
+     * Where one frame spent its time on this device, in microseconds. Each
+     * figure is a difference between two readings of the device's own clock.
+     */
+    fun encodeTiming(
+        ptsUs: Long,
+        queueWaitUs: Long,
+        decodeUs: Long,
+        displayWaitUs: Long,
+        renderIntervalUs: Long,
+    ): ByteArray {
+        val buf = ByteBuffer.allocate(1 + TIMING_LEN)
+        buf.put(MSG_TIMING.toByte())
+        buf.putLong(ptsUs)
+        buf.putInt(queueWaitUs.coerceIn(0, 0xffffffffL).toInt())
+        buf.putInt(decodeUs.coerceIn(0, 0xffffffffL).toInt())
+        buf.putInt(displayWaitUs.coerceIn(0, 0xffffffffL).toInt())
+        buf.putInt(renderIntervalUs.coerceIn(0, 0xffffffffL).toInt())
+        return buf.array()
+    }
 }

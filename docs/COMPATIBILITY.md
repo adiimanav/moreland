@@ -2,7 +2,9 @@
 
 **Verified working on exactly one setup.** Everything else below is an
 assessment of what would be required, not a claim that it works. KDE Plasma has
-since been tested and is **verified blocked** — the reasons are recorded below.
+since been tested: the `ext-image-copy-capture` path is blocked on KWin, for the
+reasons recorded below, but a separate PipeWire backend now **works** — see
+[06-plasma-backend.md](06-plasma-backend.md).
 labwc has a backend contributed and used by its author, untested by the
 maintainer. GNOME and Sway remain untested.
 
@@ -133,7 +135,7 @@ Consequences worth knowing:
 Detection accepts `XDG_CURRENT_DESKTOP` of either `labwc` or `wlroots`, since
 labwc has reported both across versions.
 
-### KDE Plasma / KWin — tested, blocked
+### KDE Plasma / KWin — works (see below for why the old path is blocked)
 
 Tested on **KWin 6.7.4 / Plasma 6.7.4** in a Wayland session. Both
 questions this section used to pose are now answered.
@@ -184,9 +186,12 @@ X-KDE-Wayland-Interfaces=zkde_screencast_unstable_v1
 A per-user desktop entry under `~/.local/share/applications` is sufficient;
 no root access is required. KWin matches the client's executable path rather
 than how it was launched. `Exec` must be an absolute path — the bare
-form is silently denied. `install.sh` writes this entry **only on a Plasma
-session**, so a Hyprland install is not littered with it; force it with
-`MORELAND_INSTALL_DESKTOP_ENTRY=1`. The mechanics and the traps are in
+form is silently denied. `install.sh` writes this entry **whenever it builds
+the KDE backend**, which it does whenever libpipewire, plasma-wayland-protocols
+and clang are installed, from any session. So installing from Hyprland still
+sets up a Plasma second session, and an install without the KDE backend is not
+littered with the entry. Force it with `MORELAND_INSTALL_DESKTOP_ENTRY=1`, or
+choose the backend with `MORELAND_PLASMA=1` or `0`. The mechanics and the traps are in
 [06-plasma-backend.md](06-plasma-backend.md).
 
 Note that the portal is *not* the answer here: it appears unable to create

@@ -18,7 +18,7 @@ LocalServerSocket("moreland")        abstract Unix socket
 ```
 
 The host reaches the socket through
-`adb forward tcp:27183 localabstract:moreland`, so traffic never touches
+`adb forward tcp:27183 localabstract:moreland-<random>`, so traffic never touches
 Android's TCP stack or `netd`.
 
 ## Design decisions

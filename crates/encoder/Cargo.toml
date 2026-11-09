@@ -14,6 +14,15 @@ gstreamer-video.workspace = true
 gstreamer-allocators.workspace = true
 capture.workspace = true
 
+[features]
+# Probe binaries that need the KDE capture backend.
+plasma = ["capture/plasma"]
+
 [[bin]]
 name = "encode-probe"
 path = "src/bin/encode_probe.rs"
+
+[[bin]]
+name = "kwin-encode-probe"
+path = "src/bin/kwin_encode_probe.rs"
+required-features = ["plasma"]

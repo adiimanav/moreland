@@ -13,6 +13,8 @@
 //! The DMA-BUF fds handed in here are the same ones the compositor wrote into,
 //! so pixels never touch the CPU between compositor and encoder.
 
+pub mod memory;
+
 use anyhow::{bail, Context, Result};
 use capture::dmabuf::Dmabuf;
 use gstreamer as gst;
@@ -217,6 +219,18 @@ pub struct EncodedPacket {
     /// Presentation timestamp as handed in with the source frame, nanoseconds.
     pub pts_ns: u64,
     pub keyframe: bool,
+}
+
+/// Where encoded access units come from, whichever encoder produced them.
+pub trait PacketSource: Send + Sync {
+    /// Pull the next encoded access unit, waiting up to `timeout`.
+    fn pull_packet(&self, timeout: Duration) -> Result<Option<EncodedPacket>>;
+}
+
+impl PacketSource for Encoder {
+    fn pull_packet(&self, timeout: Duration) -> Result<Option<EncodedPacket>> {
+        Encoder::pull_packet(self, timeout)
+    }
 }
 
 pub struct Encoder {

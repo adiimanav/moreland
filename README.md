@@ -16,8 +16,11 @@ Hyprland._</sub>
 0.6%      of one CPU core for capture
 ```
 
-> **Scope.** Verified on exactly one setup: Hyprland + AMD VA-API + a Xiaomi
-> Pad 6. Other GPUs are plausible and untested; other compositors need work.
+> **Scope.** The numbers here are from one setup: Hyprland + AMD VA-API + a
+> Xiaomi Pad 6. KDE Plasma also works, on a second setup (KWin + NVIDIA NVENC +
+> Galaxy Tab S9 FE+), with its own figures in
+> [`docs/06-plasma-backend.md`](docs/06-plasma-backend.md). Other GPUs are
+> plausible and untested; other compositors need work.
 > See [Compatibility](#compatibility). Every number here is measured on that
 > hardware, not estimated - see [`docs/`](docs/) for how.
 
@@ -53,9 +56,13 @@ to have it silently not hold. See [Multi-GPU hosts](#multi-gpu-hosts).
 
 **Host**
 
-- Hyprland, or labwc with `wlr-randr` (see [Compatibility](#compatibility) for
-  others)
-- A GPU with VA-API encode - AMD, Intel, or NVIDIA via `nvidia-vaapi-driver`
+- Hyprland, labwc with `wlr-randr`, or KDE Plasma built with
+  `--features plasma`, which `install.sh` does whenever libpipewire,
+  plasma-wayland-protocols and clang are installed (see
+  [Compatibility](#compatibility) for others)
+- A GPU with VA-API encode - AMD, Intel, or NVIDIA via `nvidia-vaapi-driver`.
+  On KDE, an NVIDIA GPU with NVENC (`nvh264enc`) or the CPU (`x264enc`) works
+  instead
 - `gstreamer`, `gst-plugins-base`, `gst-plugin-va`, `libva`
 - `android-tools` (adb), Rust toolchain
 
@@ -250,10 +257,11 @@ terminals, and browsing; it is not fine for gaming or stylus work.
 | **Hyprland**          | Verified, including 0.56's Lua config parser (see below)                                            |
 | labwc                 | Works, contributed and used by its author, untested here - you create the headless output, moreland attaches to it ([details](docs/COMPATIBILITY.md#labwc--works-with-the-output-created-by-you)) |
 | Sway / other wlroots  | Capture should work unchanged; output creation unimplemented                                        |
-| KDE Plasma (KWin)     | **Blocked, tested on KWin 6.7.4** - implements no `ext-`/`wlr-` capture protocol; needs a PipeWire backend |
+| KDE Plasma (KWin)     | **Works, tested on KWin 6.7.4** - build with `--features plasma`. Uses `zkde_screencast_unstable_v1` + PipeWire and a system-memory encoder, not zero-copy ([details](docs/06-plasma-backend.md)) |
 | GNOME (Mutter)        | Requires a portal/PipeWire capture backend; Mutter implements neither wlr nor ext capture protocols |
 | AMD VA-API            | Verified                                                                                            |
 | Intel / NVIDIA VA-API | Plausible, untested - modifiers are probed at runtime                                               |
+| NVIDIA NVENC          | Verified on KDE (GTX 1650); not used on the Hyprland path                                           |
 | Android 10+           | Verified on 14; nothing vendor-specific required                                                    |
 
 To check your own machine:
@@ -265,15 +273,16 @@ To check your own machine:
 It reports the compositor, the capture protocol, the VA-API encoder and the ADB
 link, and names whatever blocks you. Note that your **distribution is not the
 deciding factor** - the compositor is. Fedora or Debian running Hyprland should
-work; Arch running Plasma does not.
+work, and so should any distribution running Plasma, built with
+`--features plasma`.
 
 On a compositor that implements `ext-image-copy-capture-v1`, only **one** stage
 is compositor-specific: creating the headless output. Capture uses that standard
 protocol, encoding uses VA-API, transport uses ADB - so adding such a compositor
 means implementing create/remove in
 [`crates/daemon/src/output.rs`](crates/daemon/src/output.rs) and nothing else.
-A compositor *without* the protocol - KDE, GNOME - is a much larger job: a
-second, PipeWire-based capture backend.
+A compositor *without* the protocol is a much larger job: a second,
+PipeWire-based capture backend. KDE has one; GNOME does not yet.
 
 ### Hyprland's Lua config parser
 
@@ -328,11 +337,14 @@ on a shared or multi-user system:
 
 - Any local process able to reach `127.0.0.1:27183` can push frames to the
   tablet while the daemon is running.
-- Any app on the tablet can connect to the `localabstract:moreland` socket.
-  Abstract Unix sockets carry no filesystem permissions.
 
-Neither is exploitable for anything beyond drawing on the tablet's screen, and
-neither reaches back into the host. But this is a single-user desktop tool and
+On the tablet, abstract Unix sockets carry no filesystem permissions, so the
+app does its own checks: it accepts connections only from adbd (the `shell` or
+`root` user), and the daemon gives it a fresh random socket name each session,
+so no other app can claim the name first and receive the desktop stream.
+
+The remaining exposure is not exploitable for anything beyond drawing on the
+tablet's screen, and does not reach back into the host. But this is a single-user desktop tool and
 is not hardened for a hostile local user.
 
 **The app requests no Android permissions at all** - not even `INTERNET`. It can
@@ -385,11 +397,14 @@ Full inventory in [`docs/REVERT.md`](docs/REVERT.md).
 
 Especially wanted:
 
-- **Compositor backends** - Sway is the smallest step (labwc is done); KWin the
-  most requested
-- **A portal/PipeWire capture backend**, which would make GNOME and KDE work at once
+- **Compositor backends** - Sway is the smallest step (labwc and KWin are done)
+- **A portal/PipeWire capture backend** for GNOME. KDE's own PipeWire path
+  exists; GNOME needs the portal variant
+- **A zero-copy DMA-BUF path on KDE**, so Plasma can use VA-API without a CPU copy
 - **Intel and NVIDIA reports**, positive or negative
-- **Touch input** via `zwlr_virtual_pointer_v1`
+- **Touch and pen on other compositors.** KDE has both (see
+  [`docs/06-plasma-backend.md`](docs/06-plasma-backend.md)); Hyprland and wlroots
+  need a way to map the virtual devices to the output
 
 Please include your compositor, GPU, driver version, and tablet model. A
 documented failure is more useful than silence.

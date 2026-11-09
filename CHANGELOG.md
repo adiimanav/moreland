@@ -5,6 +5,64 @@ All notable changes to moreland are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, a minor bump may change
 defaults or flags.
 
+## [0.3.0] - Unreleased
+
+**Upgrade the daemon and the Android app together.** The wire protocol moves
+from version 1 to 3, so a 0.3.0 daemon cannot talk to a 0.2.0 app, nor the
+other way round. The app and the Cargo workspace now carry the release
+version (both still said 0.1.0 in 0.2.0).
+
+### Added
+
+- **KDE Plasma backend.** moreland creates the virtual output through
+  `zkde_screencast_unstable_v1`, captures it over PipeWire and encodes with
+  NVENC or x264. Build with `--features plasma`; `install.sh` does this
+  whenever libpipewire, plasma-wayland-protocols and clang are installed, from
+  any session, so one install serves Hyprland and Plasma alike. Not zero-copy
+  yet. (#14, from RudyDaBot's fork)
+- **Touch and S Pen input on KDE.** The tablet's touches and pen, with
+  pressure, tilt, hover, eraser and palm rejection, reach the host as a virtual
+  touchscreen and pen tablet mapped to the tablet's output. KDE only for now;
+  elsewhere touches are ignored. `--no-palm-rejection` turns rejection off.
+  (#14)
+- `--side left|right|above|below` places the output against an edge of the
+  main screen on KDE, which reads the live layout. Elsewhere `--position` and
+  `--position-y` still decide. (#14)
+- `--hide-cursor`; the cursor is now shown by default on KDE. (#14)
+- `--stats` breaks latency down by stage on the host and on the tablet,
+  including decode time, the wait for the screen refresh, and how evenly
+  frames reach the screen. (#14)
+- The tablet asks Android to run its panel at the stream's frame rate, so a
+  120 fps stream on a 144 Hz panel no longer judders. (#14)
+- `--transform` on KDE gives an upright portrait output; the tablet turns
+  itself to match. (#14)
+
+### Changed
+
+- On KDE the defaults are 60 fps and 60 Mbps. Elsewhere they are unchanged.
+  (#14)
+
+### Fixed
+
+- **Intel iHD** no longer fails with `not-negotiated`: when `vapostproc`
+  cannot import the captured DMA-BUF, frames fall back to system memory, and
+  zero-copy is kept wherever the driver and compositor share a format. The
+  capture format and modifier are logged at session start. (#13, #3, from
+  rei-shirataki's fork)
+- **Hyprland 0.57** ignored every monitor rule the daemon sent on a Lua
+  config: it answers `hyprctl keyword` with "unknown request", which the
+  daemon did not recognise as a refusal, so `--transform`, `--position` and
+  `--fps` silently had no effect. Any reply but "ok" now falls back to
+  `eval`. (#14)
+
+### Security
+
+- The tablet app no longer listens on the fixed socket name `moreland`. Any
+  app on the tablet could have claimed that name first and received the
+  desktop stream, and with touch input, driven the host. Each session now uses
+  a random name passed in the launch intent, and the app accepts connections
+  only from adbd. (#14, from rei-shirataki's fork)
+
 ## [0.2.0] - 28/10/2026
 
 The daemon and the Android app still speak the same wire protocol as 0.1.0,

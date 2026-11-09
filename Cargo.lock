@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "capture"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "drm-fourcc",
@@ -196,7 +196,7 @@ dependencies = [
 
 [[package]]
 name = "daemon"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "capture",
@@ -273,7 +273,7 @@ checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "encoder"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "capture",
@@ -675,7 +675,7 @@ dependencies = [
 
 [[package]]
 name = "input"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "evdev",
@@ -994,7 +994,7 @@ dependencies = [
 
 [[package]]
 name = "protocol"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
 ]
@@ -1384,7 +1384,7 @@ dependencies = [
 
 [[package]]
 name = "transport"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "protocol",

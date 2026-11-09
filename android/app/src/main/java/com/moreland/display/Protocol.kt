@@ -44,7 +44,11 @@ object Protocol {
     const val ACK_LEN = 8
     const val POINTER_LEN = 28
 
-    /** Device -> host message types. */
+    /**
+     * Device -> host message types, mirroring the registry in
+     * `crates/protocol/src/lib.rs`. 0x04 (orientation) and 0x05 (keyframe
+     * request) are reserved there for messages not implemented yet.
+     */
     const val MSG_ACK = 0x01
     const val MSG_POINTER = 0x02
     const val MSG_TIMING = 0x03

@@ -149,9 +149,18 @@ impl FrameHeader {
 }
 
 /// Device → host message types.
+///
+/// This is the registry for protocol version 3. A tag means the same thing in
+/// every build, upstream and forks alike, so a new message takes the next free
+/// value instead of reusing one; Kotlin mirrors these in `Protocol.kt`.
 pub const MSG_ACK: u8 = 0x01;
 pub const MSG_POINTER: u8 = 0x02;
 pub const MSG_TIMING: u8 = 0x03;
+// Reserved for messages not implemented here yet, from rei-shirataki's fork,
+// where they are 0x03 and 0x04: the tablet's orientation, and a keyframe
+// request after the decoder is rebuilt. They take these values upstream.
+//   0x04  orientation
+//   0x05  keyframe request
 
 /// Device → host acknowledgement, sent when a frame is handed to the display.
 ///

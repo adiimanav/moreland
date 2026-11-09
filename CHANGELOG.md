@@ -5,7 +5,7 @@ All notable changes to moreland are recorded here. The format follows
 [Semantic Versioning](https://semver.org/). Before 1.0, a minor bump may change
 defaults or flags.
 
-## [0.3.0] - Unreleased
+## [0.3.0] - 2026-11-09
 
 **Upgrade the daemon and the Android app together.** The wire protocol moves
 from version 1 to 3, so a 0.3.0 daemon cannot talk to a 0.2.0 app, nor the
@@ -149,5 +149,6 @@ Hyprland over USB.
 - Verified on Hyprland, AMD VA-API and a Xiaomi Pad 6: about 33–48 ms
   glass-to-glass, 60 fps at 1920x1200, 16 Mbps.
 
+[0.3.0]: https://github.com/adiimanav/moreland/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adiimanav/moreland/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/adiimanav/moreland/releases/tag/v0.1.0

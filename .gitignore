@@ -7,3 +7,4 @@ android/local.properties
 *.png
 .claude/
 .rederive/
+/plans/

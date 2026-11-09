@@ -401,10 +401,21 @@ Especially wanted:
 - **A portal/PipeWire capture backend** for GNOME. KDE's own PipeWire path
   exists; GNOME needs the portal variant
 - **A zero-copy DMA-BUF path on KDE**, so Plasma can use VA-API without a CPU copy
-- **Intel and NVIDIA reports**, positive or negative
-- **Touch and pen on other compositors.** KDE has both (see
-  [`docs/06-plasma-backend.md`](docs/06-plasma-backend.md)); Hyprland and wlroots
-  need a way to map the virtual devices to the output
+- **Touch and pen on labwc and Sway.** KDE has both (see
+  [`docs/06-plasma-backend.md`](docs/06-plasma-backend.md)) and Hyprland is in
+  progress; wlroots compositors need the virtual devices mapped to the output
+  (`mapToOutput` in labwc's `rc.xml`, `map_to_output` in Sway)
+- **Following the tablet into portrait** when it is turned. Device message `0x04`
+  is reserved for it, and rei-shirataki's fork has a starting point
+- **Audio** - the tablet as a speaker for the PC, and later playing in sync with
+  the PC's own speakers, over a second adb socket beside the video
+- **A `moreland camera` command** that runs scrcpy's camera mode into a
+  v4l2loopback webcam, for meetings
+- **Packages for other distributions** - an AUR package is planned; Fedora,
+  Debian/Ubuntu and Nix are welcome
+- **Intel and NVIDIA reports**, positive or negative. Intel especially: the
+  system-memory fallback in 0.3.0 (#13) has only been tested by simulating iHD on
+  AMD
 
 Please include your compositor, GPU, driver version, and tablet model. A
 documented failure is more useful than silence.
